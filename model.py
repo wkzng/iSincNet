@@ -310,7 +310,7 @@ if __name__ == '__main__':
 
 
     print("Loading audio file....")
-    audio_file_path = os.path.join(os.getenv("REPO_ROOT_PATH"), os.getenv("TEST_AUDIO_PATH"))
+    audio_file_path = "audio/15033000.mp3"
 
     sr = 16000
     x, sr = librosa.load(audio_file_path, sr=sr, offset=0, duration=1)
@@ -325,6 +325,6 @@ if __name__ == '__main__':
 
 
     plt.imshow(scalogram[0].detach().numpy())
-    plt.savefig(f"xravgram.png")
+    plt.savefig(f"spectral_representation.png")
 
     summary(sinc, input_data=x)

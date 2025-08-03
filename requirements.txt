@@ -15,3 +15,4 @@ torch-time-stretch
 tables
 pandas
 pyarrow
+torchinfo
