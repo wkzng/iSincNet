@@ -1,0 +1,12 @@
+*****.pyc
+*****.env
+*****.ipynb_checkpoints
+/venv/
+audio/
+training/checkpoints
+training/general_logs
+training/tensorboard_logs
+*/trainings
+*/trainings*
+logs/
+datasets/compiled/

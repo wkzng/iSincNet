@@ -1,0 +1,17 @@
+miniaudio
+librosa
+numpy
+torch
+tqdm
+torchaudio
+torchvision
+matplotlib
+tensorboard
+compress-json
+h5pickle
+python-dotenv
+torch-audiomentations
+torch-time-stretch
+tables
+pandas
+pyarrow
