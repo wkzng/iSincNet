@@ -116,6 +116,8 @@ def compute_revanelli_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, cau
 
         So the complex kernels can be written as 
             k(x) = exp(1j*Fx) * w(x)
+
+        Reference: Section 2.1 of  FILTERBANK DESIGN FOR END-TO-END SPEECH SEPARATION [Arxiv](https://arxiv.org/pdf/1910.10400)
     """
     #compute oscillatory frequencies (the zeroth-will be removed later)
     if scale == "lin":
