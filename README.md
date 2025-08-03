@@ -1,16 +1,14 @@
 # iSincNet
 
-Fast and Lightweight Sincnet Spectrogram Vocoder
+[[Blog]](https://gitlab.com/sonustech/sincnet) [[SincNet Paper]](https://arxiv.org/abs/1808.00158)
+
+iSincNet is as Fast and Lightweight Sincnet Spectrogram Vocoder neural network trained to reconstruct audio waveforms from their SincNet spectogram (real and signed 2d representation). We used the GTZAN dataset which is the most-used public dataset for evaluation in machine listening research for music genre recognition (MGR). The files were collected in 2000-2001 from a variety of sources including personal CDs, radio, microphone recordings, in order to represent a variety of recording conditions (http://marsyas.info/downloads/datasets.html).
 
 <p align="center">
   <img src=illustrations/SincNet-Filterbank.png alt="Fast and Lightweight Sincnet Spectrogram Vocoder" width="80%"/>
 </p>
-<p align="center">
-  <a href="https://arxiv.org/pdf/1808.00158"><img src="https://img.shields.io/badge/arXiv-2211.06687-brightgreen.svg?style=flat-square"/></a>
-</p>
 
-
-# Weights
+# Weights Details
 TODO
 
 ## Quick Start 
