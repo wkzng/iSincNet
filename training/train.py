@@ -38,9 +38,7 @@ class Trainer(BaseTrainer):
             transforms = [self.audio_augmenter.transforms[0]]
             self.optimizer.zero_grad()
             
-            #with torch.amp.autocast(device_type="xpu", enabled=self.amp_enabled, dtype=torch.float16):
-            with torch.amp.autocast(device_type=str(self.device), enabled=False, dtype=torch.float16):
-
+            with torch.amp.autocast(device_type=str(self.device), enabled=self.amp_enabled, dtype=torch.float16):
                 #compute local losses
                 local_losses = {}
                 waveforms = batch["waveform"].to(self.device)
@@ -120,7 +118,7 @@ class Trainer(BaseTrainer):
 
 
 if __name__ =="__main__":
-    from datasets.configs import GTZANConfig, EDMConfig, LegacyGenresConfig
+    from datasets.configs import GTZANConfig
     from datasets.dataset import ChunkDataset
     from model import SincNet
 

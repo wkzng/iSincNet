@@ -38,11 +38,3 @@ class GTZANConfig(BaseDatasetConfig):
 
 class EDMConfig(BaseDatasetConfig):
     id :str="edm"
-
-
-class BeatportConfig(BaseDatasetConfig):
-    id :str="beatport"
-
-
-class LegacyGenresConfig(BaseDatasetConfig):
-    id :str="legacy_genres"
