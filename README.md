@@ -2,15 +2,11 @@
 
 Fast and Lightweight Sincnet Spectrogram Vocoder
 
-
 <p align="center">
-  <img src=illustrations/SincNet-Filterbank.png alt="The Contrastive Language-Audio Pretraining Model Architecture" width="60%"/>
-
+  <img src=illustrations/SincNet-Filterbank.png alt="Fast and Lightweight Sincnet Spectrogram Vocoder" width="80%"/>
 </p>
 <p align="center">
   <a href="https://arxiv.org/pdf/1808.00158"><img src="https://img.shields.io/badge/arXiv-2211.06687-brightgreen.svg?style=flat-square"/></a>
-  #<a href="https://pypi.org/project/laion-clap"><img src="https://badge.fury.io/py/laion-clap.svg"/></a>
-  #<a href="https://huggingface.co/docs/transformers/v4.27.2/en/model_doc/clap"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Transformers-blue"/></a>
 </p>
 
 
@@ -48,7 +44,7 @@ reconstructed_audio_tensor = model.decode(spectrogram)
 #(optional) elementwise tokenization into a vocabulary of size 2^{q_bits}
 tokenizer = Tokenizer(q_bits=8).to(device)
 indices = tokenizer(spectrogram)
-detokenized_spectrogram = tokenizer(indices)
+detokenized_spectrogram = tokenizer.inverse(indices)
 detokenized_audio = model.decode(detokenized_spectrogram)
 ```
 
