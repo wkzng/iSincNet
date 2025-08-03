@@ -2,24 +2,56 @@
 
 Fast and Lightweight Sincnet Spectrogram Vocoder
 
-Implementation of reversible SincNet filterbank with a tiny network for fast non-iterative inversion
 
-<img align="center"  src=illustrations/SincNet-Filterbank.png width="500">
+<p align="center">
+  <img src=illustrations/SincNet-Filterbank.png alt="The Contrastive Language-Audio Pretraining Model Architecture" width="60%"/>
 
-Benchmark: TODO
+</p>
+<p align="center">
+  <a href="https://arxiv.org/pdf/1808.00158"><img src="https://img.shields.io/badge/arXiv-2211.06687-brightgreen.svg?style=flat-square"/></a>
+  #<a href="https://pypi.org/project/laion-clap"><img src="https://badge.fury.io/py/laion-clap.svg"/></a>
+  #<a href="https://huggingface.co/docs/transformers/v4.27.2/en/model_doc/clap"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Transformers-blue"/></a>
+</p>
 
 
-# Prerequisites and Installation
-Usage
-- PyTorch 
-- Numpy
-- Librosa
-- [miniaudio](https://github.com/irmen/pyminiaudio)
+# Weights
+TODO
 
-For training and experimentations
-```
+## Quick Start 
+```bash
 pip install -r requirements.txt
 ```
+Please refer to the [demo notebook](demo.ipynb) which shows how to load and use the model
+
+
+```python
+import numpy as np
+import librosa
+import torch
+from model import SincNet, Tokenizer
+
+# load the model
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = SincNet().load_pretrained_weights().eval().to(device)
+
+# encode and decode an audio waveform
+sample_rate = 16_000
+duration = 5
+offset = 0
+audio_file = ... 
+audio_data, _ = librosa.load(audio_file, sr=sample_rate, duration=duration, offset=offset)
+
+audio_tensor = torch.from_numpy(audio_data).to(device).float()
+spectrogram = model.encode(audio_tensor.unsqueeze(0))
+reconstructed_audio_tensor = model.decode(spectrogram)
+
+#(optional) elementwise tokenization into a vocabulary of size 2^{q_bits}
+tokenizer = Tokenizer(q_bits=8).to(device)
+indices = tokenizer(spectrogram)
+detokenized_spectrogram = tokenizer(indices)
+detokenized_audio = model.decode(detokenized_spectrogram)
+```
+
 
 ## References Papers and Related Topics
 - [1] Mirco Ravanelli, Yoshua Bengio, “Speaker Recognition from raw waveform with SincNet” [Arxiv](https://arxiv.org/abs/2109.08910)
@@ -30,17 +62,16 @@ pip install -r requirements.txt
 - [5] Toward end-to-end interpretable convolutional neural networks for waveform signals [Arxiv](https://arxiv.org/pdf/2405.01815)
 - [6] Filterband design for end-to-end speech separation [Arxiv](https://arxiv.org/pdf/1910.10400). This paper decomposes sinNet into a product sin * cos as implemented in this repo and bridgin the gap with Gabor filterbank
 
-- [7] PF-Net: Personalized Filter for Speaker Recognition from Raw Waveform [Arxiv](https://arxiv.org/abs/2105.14826). This paper proposes to extend SincNet for more flexiblity by allowing alternative shapes to rectangle function in the spectral domain
-<img align="center"  src=illustrations/PFnet.png width="300">
+- [7] PF-Net: Personalized Filter for Speaker Recognition from Raw Waveform [Arxiv](https://arxiv.org/abs/2105.14826). This paper proposes to extend SincNet for more flexiblity by allowing alternative shapes to rectangle function in the spectral domain <img align="center"  src=illustrations/PFnet.png width="300">
 
-- [8] MelGAN: Generative Adversarial Networks for Conditional Waveform Synthesis [Arxiv] https://arxiv.org/pdf/1910.06711
+- [8] MelGAN: Generative Adversarial Networks for Conditional Waveform Synthesis [Arxiv](https://arxiv.org/pdf/1910.06711)
 - [9] iSTFTNet: Fast and Lightweight Mel-Spectrogram Vocoder Incorporating Inverse Short-Time Fourier Transform [Arxiv](https://arxiv.org/abs/2203.02395)
 - [10] iSTFTNet2: Faster and More Lightweight iSTFT-Based Neural Vocoder Using 1D-2D CNN [Arxiv](https://arxiv.org/pdf/2308.07117)
 - [11] Deep Griffin-Lim Iteration [Arxiv](https://arxiv.org/abs/1903.03971)
 - [12] Mel-Spectrogram Inversion via Alternating Direction Method of Multipliers [Arxiv](https://arxiv.org/pdf/2501.05557)
+- [13] HiFi-GAN: Generative Adversarial Networks for Efficient and High Fidelity Speech Synthesis [Arxiv](https://arxiv.org/abs/2010.05646)
 
-
-Related discussion about [SincNet vs STFT]https://github.com/mravanelli/SincNet/issues/74
+Related discussion about SincNet vs STFT https://github.com/mravanelli/SincNet/issues/74
 
 ## Usages and Implementations around SincNet
 - https://github.com/mravanelli/SincNet
@@ -50,7 +81,7 @@ Related discussion about [SincNet vs STFT]https://github.com/mravanelli/SincNet/
 
 
 ## Roadmap and projects status
-- [ ] Benchmark of inversion vs 
+- [ ] Benchmark of inversion vs Griffin-Lim, iSTFTNet
 
 ## Contributions and acknowledgment
 Show your appreciation to those who have contributed to the project.
