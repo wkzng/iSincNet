@@ -171,6 +171,27 @@ def roll_and_mask(x:torch.Tensor, k:int) -> torch.Tensor:
     return x
 
 
+def rescale_spectrogram(spectrogram:torch.Tensor, eps:float=1e-12) -> torch.Tensor:
+    """ Rescale a spectrogram to use the fully range [-1, 1] for the values
+        This operation is required to stabilise computations in mu-law companding
+        and on the decoder (prevent algebra with too small values)
+
+        Caveats: this operation breaks the linearity of the spectrogram w.r.t components
+        If a signal is decomposed: w = w1 + w2
+        Then:
+            s1 = sincnet(w1)
+            s2 = sincnet(w1)
+            s = sincnet(w1 + w2) = s1 + s2
+
+        However linearity is generaly lost when using rescaling.
+            rescaled(s) = s / s_max
+                        = (s1 + s2) / s_max
+                        = ( rescaled(s1) * s1_max + rescaled(s2) * s2_max ) / s_max
+                        = (s1_max/s_max) * rescaled(s1) + (s2_max/s_max) * rescaled(s2)
+    """
+    spectrogram_max_value = eps + torch.max(spectrogram.abs().flatten(1), dim=1).values.detach().view(-1, 1, 1)
+    spectrogram = spectrogram / spectrogram_max_value
+    return spectrogram
 
 
 class Encoder1d(nn.Module):
@@ -189,7 +210,7 @@ class Encoder1d(nn.Module):
         self.register_buffer("filters", filters.unsqueeze(1))
         config.n_bins = filters.shape[0]
 
-    def forward(self, wav:torch.Tensor, eps:float=1e-12): 
+    def forward(self, wav:torch.Tensor) -> torch.Tensor: 
         """(B, L) or (B, 1, L) -> (B,F,T)"""
         if len(wav.shape) < 3:
             wav = wav.unsqueeze(1)
@@ -199,10 +220,7 @@ class Encoder1d(nn.Module):
             spectrogram = torch.real(spectrogram)
         else:
             spectrogram = torch.imag(spectrogram)
-        
-        spectrogram_max_value = eps + torch.max(spectrogram.abs().flatten(1), dim=1).values.detach().view(-1, 1, 1)
-        spectrogram = spectrogram / spectrogram_max_value
-        return spectrogram, spectrogram_max_value
+        return spectrogram
     
 
 
@@ -227,6 +245,7 @@ class Decoder1d(nn.Module):
     def forward(self, x:torch.Tensor, eps:float=1e-5) -> torch.Tensor:
         """(B,F,T) -> (B, 1, L)"""
         #resize the input
+        x = rescale_spectrogram(x)
         x = self.auto_resize(x)
 
         #compensate for the missing component (real or imag) with
@@ -250,6 +269,7 @@ class Tokenizer(nn.Module):
         self.vocab_size = 2**q_bits
 
     def forward(self, x):
+        x = rescale_spectrogram(x)
         if self.use_mulaw_companding:
             x = compute_forward_mu_law_companding(x, q_bits=self.q_bits)
         x = compute_forward_mu_law_quantize(x, q_bits=self.q_bits)
@@ -271,28 +291,21 @@ class SincNet(nn.Module):
         self.decoder = Decoder1d(self.config)
         self.name = self.config.model_id
 
-    def load_pretrained_weights(self, weights_path:str=None, freeze:bool=True, device:str="cpu") -> None:
+    def load_pretrained_weights(self, weights_folder:str, freeze:bool=True, device:str="cpu") -> None:
         """ Load pretrained weights for sincnet """
-        print(f"Loading SincNet:{self.name}...")
-        if weights_path is None:
-            current_script_path = os.path.abspath(__file__)
-            current_script_dir = os.path.dirname(current_script_path)
-            weights_path = os.path.join(current_script_dir, "pretrained", f"{self.name}.ckpt")
-            print(f"Specified weights_path is None.\nAttempting to load from {weights_path}...")
-
+        weights_path = os.path.join(weights_folder, f"{self.name}.ckpt")
+        print(f"Loading SincNet:{weights_path}...")
         checkpoint = torch.load(weights_path, map_location=torch.device(device))      
         self.load_state_dict(checkpoint["state_dict"], strict=True)
         for p in self.parameters():
             p.requires_grad = not freeze
         return self
 
-    def encode(self, x:torch.Tensor, output_scale:bool=False) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    def encode(self, x:torch.Tensor) -> torch.Tensor:
         """Compute the sincNet spectrogram"""
-        x, scale = self.encoder(x)
+        x = self.encoder(x)
         if self.training:
             assert torch.isfinite(x).all()
-        if output_scale:
-            return x, scale
         return x
 
     def decode(self, x:torch.Tensor) -> torch.Tensor:
@@ -302,7 +315,7 @@ class SincNet(nn.Module):
             assert torch.isfinite(x).all()
         return x
     
-    def forward(self, x):
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
         x = self.encode(x)
         x = self.decode(x)
         return x
