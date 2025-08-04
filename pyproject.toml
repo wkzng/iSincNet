@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 
 [tool.setuptools]
-packages = ["sincnet", "pretrained"]
+packages = ["sincnet"]
 
 [project.urls]
 "Homepage" = "https://gitlab.com/sonustech/sincnet.git"
