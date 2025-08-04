@@ -180,8 +180,8 @@ def rescale_spectrogram(spectrogram:torch.Tensor, eps:float=1e-12) -> torch.Tens
         If a signal is decomposed: w = w1 + w2
         Then:
             s1 = sincnet(w1)
-            s2 = sincnet(w1)
-            s = sincnet(w1 + w2) = s1 + s2
+            s2 = sincnet(w2)
+            s  = sincnet(w1 + w2) = s1 + s2
 
         However linearity is generaly lost when using rescaling.
             rescaled(s) = s / s_max
