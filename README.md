@@ -22,7 +22,7 @@ Please refer to the [demo notebook](demo.ipynb) which shows how to load and use 
 import numpy as np
 import librosa
 import torch
-from model import SincNet, Tokenizer
+from sincnet.model import SincNet, Tokenizer
 
 # load the model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

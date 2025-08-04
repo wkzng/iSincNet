@@ -120,7 +120,7 @@ class Trainer(BaseTrainer):
 if __name__ =="__main__":
     from datasets.configs import GTZANConfig
     from datasets.dataset import ChunkDataset
-    from model import SincNet
+    from sincnet.model import SincNet
 
     model = SincNet()
     dataset_config = GTZANConfig()

@@ -202,7 +202,7 @@ class Encoder1d(nn.Module):
         
         spectrogram_max_value = eps + torch.max(spectrogram.abs().flatten(1), dim=1).values.detach().view(-1, 1, 1)
         spectrogram = spectrogram / spectrogram_max_value
-        return spectrogram
+        return spectrogram, spectrogram_max_value
     
 
 
@@ -286,14 +286,20 @@ class SincNet(nn.Module):
             p.requires_grad = not freeze
         return self
 
-    def encode(self, x:torch.Tensor) -> torch.Tensor:
-        x = self.encoder(x)
-        assert torch.isfinite(x).all()
+    def encode(self, x:torch.Tensor, output_scale:bool=False) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Compute the sincNet spectrogram"""
+        x, scale = self.encoder(x)
+        if self.training:
+            assert torch.isfinite(x).all()
+        if output_scale:
+            return x, scale
         return x
 
     def decode(self, x:torch.Tensor) -> torch.Tensor:
+        """Reconstruct audio from sincNet spectrogram"""
         x = self.decoder(x)
-        assert torch.isfinite(x).all()
+        if self.training:
+            assert torch.isfinite(x).all()
         return x
     
     def forward(self, x):
