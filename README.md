@@ -8,8 +8,13 @@ iSincNet is as Fast and Lightweight Sincnet Spectrogram Vocoder neural network t
   <img src=illustrations/SincNet-Filterbank.png alt="Fast and Lightweight Sincnet Spectrogram Vocoder" width="80%"/>
 </p>
 
-# Weights Details
-TODO
+# TODO: Benchmark
+colums: architecture or method | dataset | MSE | MAE | SNR | checkpoint
+
+datasets:
+- [GTZAN](https://github.com/chittalpatel/Music-Genre-Classification-GTZAN)
+- [MUSDB-18](https://sigsep.github.io/datasets/musdb.html)
+
 
 ## Quick Start 
 ```bash
@@ -76,6 +81,7 @@ Related discussion about SincNet vs STFT https://github.com/mravanelli/SincNet/i
 
 ## Roadmap and projects status
 - [ ] Benchmark of inversion vs Griffin-Lim, iSTFTNet
+- [ ] Host weights in cloud and add auto-download
 
 ## Contributions and acknowledgment
 Show your appreciation to those who have contributed to the project.
