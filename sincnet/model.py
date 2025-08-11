@@ -106,7 +106,7 @@ def mel_freqs(fs:int, n_bins:int) -> np.ndarray:
     return backward(np.linspace(forward(fmin), forward(fmax), n_bins))
     
 
-def compute_revanelli_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causal:bool) -> torch.Tensor:
+def compute_complex_sinc_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causal:bool) -> torch.Tensor:
     """ Compute real and imaginary part of sinc kernels
             r(x) = 2a*sinc(ax) - 2b*sinc(bx)  with x=2πt
 
@@ -200,7 +200,7 @@ class Encoder1d(nn.Module):
         self.stride = config.hop_length
         self.padding = config.kernel_size // 2
         self.component = config.component
-        filters = compute_revanelli_kernel(
+        filters = compute_complex_sinc_kernel(
             kernel_size=config.kernel_size,
             fs=config.fs,
             n_bins=config.n_bins,
