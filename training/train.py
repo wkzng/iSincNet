@@ -45,12 +45,13 @@ class Trainer(BaseTrainer):
 
                 waveforms[0] *= 0
                 if 2 * np.random.random() < 1:
-                    waveforms = torch.flip(waveforms, dims=[1])
+                    waveforms = torch.flip(waveforms, dims=[-1])
                 if 2 * np.random.random() < 1:
                     waveforms = - waveforms
 
+                #print("\n================")
                 for T in transforms:
-                    transformed_wav = T(waveforms)
+                    transformed_wav = T(waveforms).squeeze(1)
                     reconstructed_wav = self.model(transformed_wav)
 
                     transformed_stft = self.stft.compute_log1p_magnitude(transformed_wav)
@@ -136,7 +137,6 @@ if __name__ =="__main__":
     datasets = {
         mode:ChunkDataset(
             parquet_file_path=dataset_config.parquet,
-            model_config_file_path=dataset_config.config,
             h5_file_path = dataset_config.hdf5,
             mode=mode,
         )
