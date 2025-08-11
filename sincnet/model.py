@@ -331,7 +331,7 @@ if __name__ == '__main__':
 
 
     print("Loading audio file....")
-    audio_file_path = "audio/15033000.mp3"
+    audio_file_path = "audio/invertibility/15033000.mp3"
 
     sr = 16000
     x, sr = librosa.load(audio_file_path, sr=sr, offset=0, duration=1)
