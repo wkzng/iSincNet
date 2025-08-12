@@ -12,30 +12,35 @@ from dataclasses import dataclass, asdict
 class ModelArgs:
     """ Theoreticall framework:
             STFT imposes:  
-                channels = n_fft/2 + 1   -> n_fft = 2 * (c - 1)
-                window_length <= n_fft   -> n_fft = coverage * window_length  with coverage>=1
-                hop_lenth <= window_length -> window_length = overlap * hop_length  (traditionnaly for anti-aliasing overlap>=4)
+                n_bins = n_fft/2 + 1   -> n_fft = 2 * (n_bins - 1)
+                window_length <= n_fft -> n_fft = coverage * window_length  with coverage>=1
+                hop_lenth <= window_length -> window_length = overlap * hop_length  (often for anti-aliasing overlap>=4)
             Geometrically: 
                 fs = FPS * hop_lenth
             Consequence:
-                coverage * overlap * fs = 2 * FPS * (channels - 1) -> there is a strong dependency link between the FPS and channels
+                coverage * overlap * fs = 2 * FPS * (n_bins - 1)
 
         Practically: we want to control the FPS reasonably well so we need FPS to be a divisor of fs
             fs = 22050 = 2 * (3*5*7)^2  so interesting candidates for FPS are {45 49 50 63 70 75 90 98 105 126 147 150}
             fs = 16000 = 4^2 * (2*5)^3  so interesting candidates for FPS are {40, 50, 64, 80, 100, 125, 128, 160}
     """
+    scale : str
     fs:int = 16000
     fps: int = 128
-    n_bins: int = 127
+    n_bins: int = 128
     q_bits : int = 8
-    scale : str = "lin"
     component : str = "real"
-    causal: bool = False
+    causal: bool = True
+    neighborhood_radius : int = 4
 
     @property
     def args(self) -> dict:
         return asdict(self)
 
+    @property
+    def n_fft(self) -> int:
+        return 2 * (self.n_bins - 1)
+    
     @property
     def hop_length(self) -> int:
         return self.fs // self.fps
@@ -50,9 +55,9 @@ class ModelArgs:
         return f"{self.fs}_{self.fps}_{self.n_bins}_{self.component}_{self.scale}_{causal}"
     
     @property
-    def shifts(self) -> list[int]:
-        width = 4
-        return range(-width//2, width//2 + 1)
+    def neighborhood(self) -> list[int]:
+        radius = self.neighborhood_radius
+        return range(-radius//2, radius//2 + 1)
 
 
 
@@ -121,16 +126,21 @@ def compute_complex_sinc_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, 
     """
     #compute oscillatory frequencies (the zeroth-will be removed later)
     if scale == "lin":
-        f = lin_freqs(fs=fs, n_bins=n_bins+1)
+        freq_hz = lin_freqs(fs=fs, n_bins=n_bins + 1)
+    elif scale == "mel":
+        freq_hz = mel_freqs(fs=fs, n_bins=n_bins + 1)
     else:
-        f = mel_freqs(fs=fs, n_bins=n_bins+1)
-
-    F = torch.from_numpy(f[1:]).float().view(-1, 1)
-    B = torch.from_numpy(np.diff(f)).float().view(-1, 1)
+        raise ValueError("Only lin, mel scales are supported for the SincNet Kernel")
+    
+    #compute frequency centers and bands widths
+    band_hz = np.diff(freq_hz)
+    freq_hz = freq_hz[1:]
+    F = torch.from_numpy(freq_hz).float().view(-1, 1)
+    B = torch.from_numpy(band_hz).float().view(-1, 1)
 
     #compute time intervals
     t = torch.linspace(-1/2, 1/2, steps=kernel_size).view(1,-1) * kernel_size / fs
-    x = 2 * np.pi * t
+    x = 2 * torch.pi * t
     Fx = torch.matmul(F, x)
     Bx = torch.matmul(B, x)
     
@@ -140,17 +150,16 @@ def compute_complex_sinc_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, 
     #compte w(x) = 2B * sinc(Bx/2)
     #Note: the implementation torch.sinc = np.sinc corresponds to the normalised sinc defined as sinc(x)=sinc_π(x/π) 
     #Therefore w(x) = 2B * sinc_π(Bx/2π)
-    weighting = (2*B) * torch.sinc((Bx/2) / torch.pi)
-    
+    envelope = (2*B) * torch.sinc((Bx/2) / torch.pi)
+
     #compute locality window
-    locality = torch.from_numpy(np.hanning(kernel_size)).float().view(1, -1)
+    window = torch.from_numpy(np.hanning(kernel_size)).float().view(1, -1)
     if causal:
-        locality[0, kernel_size//2+1:] = 0
-    
+        window[0, kernel_size//2+1:] = 0
+
     #normalise the kernel
-    weights = vibrations * weighting 
-    weights = weights * locality 
-    weights = weights / torch.sum(weights.abs()**2, dim=1).view(-1, 1)
+    weights = vibrations * envelope * window
+    weights = weights / torch.sum(weights.abs(), dim=1).view(-1, 1)
     return weights
 
 
@@ -208,7 +217,6 @@ class Encoder1d(nn.Module):
             causal=config.causal
         )
         self.register_buffer("filters", filters.unsqueeze(1))
-        config.n_bins = filters.shape[0]
 
     def forward(self, wav:torch.Tensor) -> torch.Tensor: 
         """(B, L) or (B, 1, L) -> (B,F,T)"""
@@ -228,9 +236,9 @@ class Decoder1d(nn.Module):
     def __init__(self, config:ModelArgs):
         super().__init__()
         self.config = config
-        self.shifts = config.shifts
-        d = len(self.shifts) * config.n_bins
-        self.Winv = nn.Parameter(torch.ones(d, config.hop_length))
+        self.shifts = config.neighborhood
+        self.size = len(self.shifts)
+        self.Winv = nn.Parameter(torch.ones(self.size * config.n_bins, config.hop_length))
     
     def auto_resize(self, x:torch.Tensor) -> torch.Tensor:
         """Automatically pad or cut the frequency-axis to meet the dimensions of the inverter"""
@@ -284,9 +292,9 @@ class Tokenizer(nn.Module):
 
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
-    def __init__(self, config:ModelArgs=None, scale:str="lin", causal:bool=True):
+    def __init__(self, config:ModelArgs=None, scale:str="lin"):
         super().__init__()
-        self.config = config if config else ModelArgs(scale=scale, causal=causal)
+        self.config = config if config else ModelArgs(scale=scale)
         self.encoder = Encoder1d(self.config)
         self.decoder = Decoder1d(self.config)
         self.name = self.config.model_id
