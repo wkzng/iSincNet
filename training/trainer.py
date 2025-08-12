@@ -92,6 +92,9 @@ class BaseTrainer:
             device = "xpu"
             print(f"Nbr of XPU devices: {torch.xpu.device_count()}")
             print(f"Current XPU device: {torch.xpu.current_device()}")
+            
+            print("Overriding XPU device to CPU")
+            device = "cpu"
         else:
             device = "cpu"
 
