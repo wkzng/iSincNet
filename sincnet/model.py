@@ -111,6 +111,21 @@ def mel_freqs(fs:int, n_bins:int) -> np.ndarray:
     return backward(np.linspace(forward(fmin), forward(fmax), n_bins))
     
 
+def get_zero_overlap_band(freq_hz:np.ndarray, fs:float) -> np.ndarray:
+    """ Adaptive computation of bands to remove any whole"""
+    n = len(freq_hz)
+    edges = []
+    for k in range(1, n):
+        right = (freq_hz[k] + freq_hz[k-1]) / 2
+        edges.append(right)
+    
+    edges = [0] + edges + [freq_hz[-1]]
+    edges = np.asarray(edges)
+    bands = edges[1:] - edges[:-1]
+    assert np.isclose(bands.sum(), fs/2.0, rtol=1e-5)
+    return bands[1:]
+
+
 def compute_complex_sinc_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causal:bool) -> torch.Tensor:
     """ Compute real and imaginary part of sinc kernels
             r(x) = 2a*sinc(ax) - 2b*sinc(bx)  with x=2πt
@@ -132,10 +147,12 @@ def compute_complex_sinc_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, 
     else:
         raise ValueError("Only lin, mel scales are supported for the SincNet Kernel")
     
-    #compute frequency centers and bands widths
+    #compute bandwidths with sanity check
+    #band_hz = get_zero_overlap_band(freq_hz, fs)
     band_hz = np.diff(freq_hz)
-    freq_hz = freq_hz[1:]
-    F = torch.from_numpy(freq_hz).float().view(-1, 1)
+
+    #compute parametric centers and width tensors
+    F = torch.from_numpy(freq_hz[1:]).float().view(-1, 1)
     B = torch.from_numpy(band_hz).float().view(-1, 1)
 
     #compute time intervals
@@ -220,14 +237,15 @@ class Encoder1d(nn.Module):
 
     def forward(self, wav:torch.Tensor) -> torch.Tensor: 
         """(B, L) or (B, 1, L) -> (B,F,T)"""
+        if self.component == "real":
+            weights = torch.real(self.filters)
+        else:
+            weights = torch.imag(self.filters)
+
         if len(wav.shape) < 3:
             wav = wav.unsqueeze(1)
         wav = F.pad(wav, (self.padding, self.padding), mode="reflect")
-        spectrogram = F.conv1d(wav + 0j, weight=self.filters, bias=None, stride=self.stride, padding=0)
-        if self.component == "real":
-            spectrogram = torch.real(spectrogram)
-        else:
-            spectrogram = torch.imag(spectrogram)
+        spectrogram = F.conv1d(wav, weight=weights, bias=None, stride=self.stride, padding=0)
         return spectrogram
     
 
@@ -264,7 +282,8 @@ class Decoder1d(nn.Module):
         x = x @ self.Winv
         x = x.flatten(1)
         
-        xmax = eps + torch.max(x, dim=1).values.detach().view(-1, 1)
+        y = x if self.training else x.abs() 
+        xmax = eps + torch.max(y, dim=1).values.detach().view(-1, 1)
         x = x / xmax
         return x
 
