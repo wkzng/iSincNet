@@ -29,7 +29,7 @@ class ModelArgs:
     n_bins: int = 128
     q_bits : int = 8
     component : str = "real"
-    causal: bool = False
+    causal: bool = True
     neighborhood_radius : int = 4
 
     @property
