@@ -29,7 +29,7 @@ class ModelArgs:
     n_bins: int = 128
     q_bits : int = 8
     component : str = "real"
-    causal: bool = True
+    causal: bool = False
     neighborhood_radius : int = 4
 
     @property
@@ -290,26 +290,23 @@ class Decoder1d(nn.Module):
         return x
 
 
-class Tokenizer(nn.Module):
-    def __init__(self, q_bits:int, use_mulaw_companding:bool=True):
+class Quantizer(nn.Module):
+    def __init__(self, q_bits:int):
         super().__init__()
         self.q_bits = q_bits
-        self.use_mulaw_companding = use_mulaw_companding
         self.vocab_size = 2**q_bits
 
-    def forward(self, x):
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
         x = rescale_spectrogram(x)
-        if self.use_mulaw_companding:
-            x = compute_forward_mu_law_companding(x, q_bits=self.q_bits)
+        x = compute_forward_mu_law_companding(x, q_bits=self.q_bits)
         x = compute_forward_mu_law_quantize(x, q_bits=self.q_bits)
         return x
         
-    def inverse(self, x):
+    def inverse(self, x:torch.Tensor) -> torch.Tensor:
         x = compute_backward_mu_law_quantize(x, q_bits=self.q_bits)
-        if self.use_mulaw_companding:
-            x = compute_backward_mu_law_companding(x, q_bits=self.q_bits)
+        x = compute_backward_mu_law_companding(x, q_bits=self.q_bits)
+        x = rescale_spectrogram(x)
         return x
-
 
 
 class FilterBankMorpher(nn.Module):
@@ -358,7 +355,14 @@ class SincNet(nn.Module):
         for p in self.parameters():
             p.requires_grad = not freeze
         return self
-
+    
+    def freeze_autoencoder(self) -> None:
+        """Freeze the linear filterbank autoencoder"""
+        for module in[self.encoder, self.decoder]:
+            for p in module.parameters():
+                p.requires_grad = False
+        return self
+    
     def encode(self, x:torch.Tensor, scale:str="lin") -> torch.Tensor:
         """Compute the sincNet spectrogram"""
         x = self.encoder(x)
@@ -391,9 +395,9 @@ class SincNet(nn.Module):
                 x_lin_hat =  filterbank.inverse(x_scale_hat)
                 loss_morph += F.l1_loss(x_lin_hat, x_lin)
 
-                # roundtrip (scale -> lin) if consistancy
-                x_lin_hat =  filterbank.inverse(x_scale)
-                loss_morph += F.l1_loss(x_lin_hat, x_lin)
+                # inversion (scale -> lin) if consistancy
+                # x_lin_hat =  filterbank.inverse(x_scale)
+                # loss_morph += F.l1_loss(x_lin_hat, x_lin)
 
                 #roundtrip waveform consistancy in time space
                 x_hat = self.decode(x_lin_hat)
