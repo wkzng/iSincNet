@@ -27,7 +27,7 @@ Please refer to the [demo notebook](demo.ipynb) which shows how to load and use 
 import numpy as np
 import librosa
 import torch
-from sincnet.model import SincNet, Tokenizer
+from sincnet.model import SincNet, Quantizer
 
 # load the model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -41,12 +41,12 @@ audio_file = ...
 audio_data, _ = librosa.load(audio_file, sr=sample_rate, duration=duration, offset=offset)
 
 audio_tensor = torch.from_numpy(audio_data).to(device).float()
-spectrogram = model.encode(audio_tensor.unsqueeze(0))
+spectrogram = model.encode(audio_tensor.unsqueeze(0), scale="mel")
 reconstructed_audio_tensor = model.decode(spectrogram)
 
 #(optional) elementwise tokenization into a vocabulary of size 2^{q_bits}
-tokenizer = Tokenizer(q_bits=8).to(device)
-indices = tokenizer(spectrogram)
+quantizer = Quantizer(q_bits=8).to(device)
+indices = quantizer(spectrogram)
 detokenized_spectrogram = tokenizer.inverse(indices)
 detokenized_audio = model.decode(detokenized_spectrogram)
 ```
@@ -80,6 +80,7 @@ Related discussion about SincNet vs STFT https://github.com/mravanelli/SincNet/i
 
 
 ## Roadmap and projects status
+- [x] Added Automatic projection forward and backward to MEL scale
 - [ ] Benchmark of inversion vs Griffin-Lim, iSTFTNet
 - [ ] Host weights in cloud and add auto-download
 
