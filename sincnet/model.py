@@ -24,7 +24,6 @@ class ModelArgs:
             fs = 22050 = 2 * (3*5*7)^2  so interesting candidates for FPS are {45 49 50 63 70 75 90 98 105 126 147 150}
             fs = 16000 = 4^2 * (2*5)^3  so interesting candidates for FPS are {40, 50, 64, 80, 100, 125, 128, 160}
     """
-    scale : str
     fs:int = 16000
     fps: int = 128
     n_bins: int = 128
@@ -52,7 +51,7 @@ class ModelArgs:
     @property
     def model_id(self) -> str:
         causal = "causal" if self.causal else "ncausal"
-        return f"{self.fs}_{self.fps}_{self.n_bins}_{self.component}_{self.scale}_{causal}"
+        return f"{self.fs}fs_{self.fps}fps_{self.n_bins}bins_{self.component}_{causal}"
     
     @property
     def neighborhood(self) -> list[int]:
@@ -111,6 +110,21 @@ def mel_freqs(fs:int, n_bins:int) -> np.ndarray:
     return backward(np.linspace(forward(fmin), forward(fmax), n_bins))
     
 
+def get_zero_overlap_band(freq_hz:np.ndarray, fs:float) -> np.ndarray:
+    """ Adaptive computation of bands to remove any whole"""
+    n = len(freq_hz)
+    edges = []
+    for k in range(1, n):
+        right = (freq_hz[k] + freq_hz[k-1]) / 2
+        edges.append(right)
+    
+    edges = [0] + edges + [freq_hz[-1]]
+    edges = np.asarray(edges)
+    bands = edges[1:] - edges[:-1]
+    assert np.isclose(bands.sum(), fs/2.0, rtol=1e-5)
+    return bands[1:]
+
+
 def compute_complex_sinc_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causal:bool) -> torch.Tensor:
     """ Compute real and imaginary part of sinc kernels
             r(x) = 2a*sinc(ax) - 2b*sinc(bx)  with x=2πt
@@ -132,10 +146,12 @@ def compute_complex_sinc_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, 
     else:
         raise ValueError("Only lin, mel scales are supported for the SincNet Kernel")
     
-    #compute frequency centers and bands widths
+    #compute bandwidths with sanity check
+    #band_hz = get_zero_overlap_band(freq_hz, fs)
     band_hz = np.diff(freq_hz)
-    freq_hz = freq_hz[1:]
-    F = torch.from_numpy(freq_hz).float().view(-1, 1)
+
+    #compute parametric centers and width tensors
+    F = torch.from_numpy(freq_hz[1:]).float().view(-1, 1)
     B = torch.from_numpy(band_hz).float().view(-1, 1)
 
     #compute time intervals
@@ -204,7 +220,7 @@ def rescale_spectrogram(spectrogram:torch.Tensor, eps:float=1e-12) -> torch.Tens
 
 
 class Encoder1d(nn.Module):
-    def __init__(self, config:ModelArgs):
+    def __init__(self, config:ModelArgs, scale:str):
         super().__init__()
         self.stride = config.hop_length
         self.padding = config.kernel_size // 2
@@ -213,21 +229,22 @@ class Encoder1d(nn.Module):
             kernel_size=config.kernel_size,
             fs=config.fs,
             n_bins=config.n_bins,
-            scale=config.scale,
+            scale=scale,
             causal=config.causal
         )
         self.register_buffer("filters", filters.unsqueeze(1))
 
     def forward(self, wav:torch.Tensor) -> torch.Tensor: 
         """(B, L) or (B, 1, L) -> (B,F,T)"""
+        if self.component == "real":
+            weights = torch.real(self.filters)
+        else:
+            weights = torch.imag(self.filters)
+
         if len(wav.shape) < 3:
             wav = wav.unsqueeze(1)
         wav = F.pad(wav, (self.padding, self.padding), mode="reflect")
-        spectrogram = F.conv1d(wav + 0j, weight=self.filters, bias=None, stride=self.stride, padding=0)
-        if self.component == "real":
-            spectrogram = torch.real(spectrogram)
-        else:
-            spectrogram = torch.imag(spectrogram)
+        spectrogram = F.conv1d(wav, weight=weights, bias=None, stride=self.stride, padding=0)
         return spectrogram
     
 
@@ -252,81 +269,145 @@ class Decoder1d(nn.Module):
 
     def forward(self, x:torch.Tensor, eps:float=1e-5) -> torch.Tensor:
         """(B,F,T) -> (B, 1, L)"""
-        #resize the input
+        #rescale imputs to [-1,1] and resize the input (if necessary)
         x = rescale_spectrogram(x)
         x = self.auto_resize(x)
 
         #compensate for the missing component (real or imag) with
-        #forward and backward lag frames
+        #forward and backward lagged frames projected into the temporal space
+        #NOTE: This manual operation of roll_and_mask + linear layer is strictly
+        #equivalent to a 1d convolution with appropriate kernel size but for unkown
+        #reasons, using linear layer produced more stable results
         x = x.transpose(1,2) #(B,T,F)
         x = [roll_and_mask(x=x, k=k) for k in self.shifts]
         x = torch.cat(x, dim=-1)
         x = x @ self.Winv
         x = x.flatten(1)
         
-        xmax = eps + torch.max(x, dim=1).values.detach().view(-1, 1)
+        y = x if self.training else x.abs() 
+        xmax = eps + torch.max(y, dim=1).values.detach().view(-1, 1)
         x = x / xmax
         return x
 
 
-class Tokenizer(nn.Module):
-    def __init__(self, q_bits:int, use_mulaw_companding:bool=True):
+class Quantizer(nn.Module):
+    def __init__(self, q_bits:int):
         super().__init__()
         self.q_bits = q_bits
-        self.use_mulaw_companding = use_mulaw_companding
         self.vocab_size = 2**q_bits
 
-    def forward(self, x):
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
         x = rescale_spectrogram(x)
-        if self.use_mulaw_companding:
-            x = compute_forward_mu_law_companding(x, q_bits=self.q_bits)
+        x = compute_forward_mu_law_companding(x, q_bits=self.q_bits)
         x = compute_forward_mu_law_quantize(x, q_bits=self.q_bits)
         return x
         
-    def inverse(self, x):
+    def inverse(self, x:torch.Tensor) -> torch.Tensor:
         x = compute_backward_mu_law_quantize(x, q_bits=self.q_bits)
-        if self.use_mulaw_companding:
-            x = compute_backward_mu_law_companding(x, q_bits=self.q_bits)
+        x = compute_backward_mu_law_companding(x, q_bits=self.q_bits)
+        x = rescale_spectrogram(x)
         return x
+
+
+class FilterBankMorpher(nn.Module):
+    def __init__(self, config:ModelArgs, scale:str):
+        super().__init__()
+        assert scale != "lin"
+        self.encoder = Encoder1d(config, scale=scale)
+        self.morpher = nn.Linear(config.n_bins, config.n_bins, bias=False)
+        self.inverser = nn.Linear(config.n_bins, config.n_bins, bias=False)
+        #NOTE: For unkown reasons, using Conv1d instead of Linear layer converged slower
+        #and toward more slightly hissing white noise in reconstructed waveform.
+
+    def encode(self, x):
+        return self.encoder(x)
+
+    def morphe(self, x):
+        """(B,F,T) -> (B,F,T)"""
+        x = self.morpher(x.transpose(1,2)).transpose(1,2)
+        return x
+    
+    def inverse(self, x):
+        """(B,F,T) -> (B,F,T)"""
+        x = self.inverser(x.transpose(1,2)).transpose(1,2)
+        return x 
 
 
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
-    def __init__(self, config:ModelArgs=None, scale:str="lin"):
+    def __init__(self, config:ModelArgs=None):
         super().__init__()
-        self.config = config if config else ModelArgs(scale=scale)
-        self.encoder = Encoder1d(self.config)
-        self.decoder = Decoder1d(self.config)
+        self.config = config if config else ModelArgs()
         self.name = self.config.model_id
+        self.encoder = Encoder1d(self.config, scale="lin")
+        self.decoder = Decoder1d(self.config)
+        self.morphers = nn.ModuleDict({
+            "mel": FilterBankMorpher(self.config, scale="mel")
+        })
 
     def load_pretrained_weights(self, weights_folder:str, freeze:bool=True, device:str="cpu") -> None:
         """ Load pretrained weights for sincnet """
         weights_path = os.path.join(weights_folder, f"{self.name}.ckpt")
         print(f"Loading SincNet:{weights_path}...")
-        checkpoint = torch.load(weights_path, map_location=torch.device(device))      
+        checkpoint = torch.load(weights_path, map_location=torch.device(device))
+        print("EPOCH", checkpoint["epoch"], "// NSTEP", checkpoint["n_steps"])   
         self.load_state_dict(checkpoint["state_dict"], strict=True)
         for p in self.parameters():
             p.requires_grad = not freeze
         return self
-
-    def encode(self, x:torch.Tensor) -> torch.Tensor:
+    
+    def freeze_autoencoder(self) -> None:
+        """Freeze the linear filterbank autoencoder"""
+        for module in[self.encoder, self.decoder]:
+            for p in module.parameters():
+                p.requires_grad = False
+        return self
+    
+    def encode(self, x:torch.Tensor, scale:str="lin") -> torch.Tensor:
         """Compute the sincNet spectrogram"""
         x = self.encoder(x)
-        if self.training:
-            assert torch.isfinite(x).all()
+        if scale != "lin":
+            x = self.morphers[scale].morphe(x)
         return x
 
-    def decode(self, x:torch.Tensor) -> torch.Tensor:
-        """Reconstruct audio from sincNet spectrogram"""
-        x = self.decoder(x)
-        if self.training:
-            assert torch.isfinite(x).all()
-        return x
+    def decode(self, x:torch.Tensor, scale:str="lin") -> torch.Tensor:
+        """Reconstruct audio from linear sincNet spectrogram"""
+        if scale != "lin":
+            x = self.morphers[scale].inverse(x)
+        return self.decoder(x)
     
-    def forward(self, x:torch.Tensor) -> torch.Tensor:
-        x = self.encode(x)
-        x = self.decode(x)
-        return x
+    def forward(self, x:torch.Tensor, ret_loss:bool=True) -> torch.Tensor:
+        x_lin = self.encode(x)
+
+        scale_info = {}
+        if ret_loss:
+            loss_morph = 0
+            loss_temp_cst = 0
+            for _, filterbank in self.morphers.items():
+                filterbank: FilterBankMorpher = filterbank
+                x_scale = filterbank.encode(x).detach()
+
+                # morphing consistancy (lin -> scale)
+                x_scale_hat = filterbank.morphe(x_lin)
+                loss_morph += F.l1_loss(x_scale_hat, x_scale)
+
+                # roundtrip (lin -> scale -> lin) if consistancy
+                x_lin_hat =  filterbank.inverse(x_scale_hat)
+                loss_morph += F.l1_loss(x_lin_hat, x_lin)
+
+                # inversion (scale -> lin) if consistancy
+                # x_lin_hat =  filterbank.inverse(x_scale)
+                # loss_morph += F.l1_loss(x_lin_hat, x_lin)
+
+                #roundtrip waveform consistancy in time space
+                x_hat = self.decode(x_lin_hat)
+                loss_temp_cst += F.l1_loss(x_hat, x) + F.mse_loss(x_hat, x)
+
+            scale_info["morph"] = loss_morph
+            scale_info["tcst"] = loss_temp_cst
+
+        x = self.decode(x_lin)
+        return x, scale_info
 
 
 

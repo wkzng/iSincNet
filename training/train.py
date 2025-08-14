@@ -32,6 +32,7 @@ class Trainer(BaseTrainer):
         n_batches = len(self.train_loader)
         lr = self.scheduler.get_lr()[0]
         progress_bar = tqdm(enumerate(self.train_loader), ncols=200, total=n_batches, disable=False)
+        min_epoch_before_multifb = 20
 
         for b_idx, batch in progress_bar:
             #transforms = self.audio_augmenter.get_random_transforms(k=3)
@@ -52,22 +53,29 @@ class Trainer(BaseTrainer):
                 #print("\n================")
                 for T in transforms:
                     transformed_wav = T(waveforms).squeeze(1)
-                    reconstructed_wav = self.model(transformed_wav)
+                    reconstructed_wav, scale_info = self.model(
+                        transformed_wav, 
+                        ret_loss=current_epoch>=min_epoch_before_multifb
+                    )
 
                     transformed_stft = self.stft.compute_log1p_magnitude(transformed_wav)
                     reconstructed_stft = self.stft.compute_log1p_magnitude(reconstructed_wav)
+                    
+                    if current_epoch < 2 * min_epoch_before_multifb:
+                        tempocal_roundtrip_loss = scale_info.pop("tcst", None)
+                        if tempocal_roundtrip_loss:
+                            scale_info["tcst"] = tempocal_roundtrip_loss.item()
 
-                    loss_l1 = F.l1_loss(transformed_wav, reconstructed_wav)
-                    loss_l2 = F.mse_loss(transformed_wav, reconstructed_wav)
-                    loss_msl = F.l1_loss(transformed_stft, reconstructed_stft) 
-
-                    if torch.isfinite(loss_l1):
-                        local_losses["tL1"] = local_losses.get("tL1", 0) + loss_l1
-                    if torch.isfinite(loss_l2):
-                        local_losses["tL2"] = local_losses.get("tL2", 0) + loss_l2
-                    if torch.isfinite(loss_msl):
-                        local_losses["msl"] = local_losses.get("msl", 0) + loss_msl
-
+                    batch_losses = {
+                        "tL1": F.l1_loss(transformed_wav, reconstructed_wav),
+                        "tL2": F.mse_loss(transformed_wav, reconstructed_wav),
+                        "msl": F.l1_loss(transformed_stft, reconstructed_stft),
+                        **scale_info
+                    }
+                    for k, value in batch_losses.items():
+                        if isinstance(value, torch.Tensor) and torch.isfinite(value):
+                            local_losses[k] = local_losses.get(k, 0) + value
+        
                 #aggregate local losses into global train loss
                 train_loss = 0
                 for _, loss in local_losses.items():
@@ -135,12 +143,12 @@ if __name__ =="__main__":
 
 
     datasets = {
-        mode:ChunkDataset(
+        split:ChunkDataset(
             parquet_file_path=dataset_config.parquet,
             h5_file_path = dataset_config.hdf5,
-            mode=mode,
+            split=split,
         )
-        for mode in ["train", "test"]
+        for split in ["train", "test"]
     }
     
     trainer = Trainer(
