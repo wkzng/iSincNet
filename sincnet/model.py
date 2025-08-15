@@ -335,9 +335,10 @@ class FilterBankMorpher(nn.Module):
 
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
-    def __init__(self, config:ModelArgs=None):
+    def __init__(self, config:ModelArgs=None, scale:str="lin"):
         super().__init__()
         self.config = config if config else ModelArgs()
+        self.scale = scale
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config, scale="lin")
         self.decoder = Decoder1d(self.config)
@@ -345,12 +346,13 @@ class SincNet(nn.Module):
             "mel": FilterBankMorpher(self.config, scale="mel")
         })
 
-    def load_pretrained_weights(self, weights_folder:str, freeze:bool=True, device:str="cpu") -> None:
+    def load_pretrained_weights(self, weights_folder:str, freeze:bool=True, device:str="cpu", verbose:bool=True) -> None:
         """ Load pretrained weights for sincnet """
         weights_path = os.path.join(weights_folder, f"{self.name}.ckpt")
-        print(f"Loading SincNet:{weights_path}...")
         checkpoint = torch.load(weights_path, map_location=torch.device(device))
-        print("EPOCH", checkpoint["epoch"], "// NSTEP", checkpoint["n_steps"])   
+        if verbose:
+            print(f"Loading SincNet:{weights_path}...")
+            print("EPOCH", checkpoint["epoch"], "// NSTEP", checkpoint["n_steps"]) 
         self.load_state_dict(checkpoint["state_dict"], strict=True)
         for p in self.parameters():
             p.requires_grad = not freeze
@@ -363,15 +365,17 @@ class SincNet(nn.Module):
                 p.requires_grad = False
         return self
     
-    def encode(self, x:torch.Tensor, scale:str="lin") -> torch.Tensor:
+    def encode(self, x:torch.Tensor, scale:str=None) -> torch.Tensor:
         """Compute the sincNet spectrogram"""
+        scale = scale or self.scale
         x = self.encoder(x)
         if scale != "lin":
             x = self.morphers[scale].morphe(x)
         return x
 
-    def decode(self, x:torch.Tensor, scale:str="lin") -> torch.Tensor:
+    def decode(self, x:torch.Tensor, scale:str=None) -> torch.Tensor:
         """Reconstruct audio from linear sincNet spectrogram"""
+        scale = scale or self.scale
         if scale != "lin":
             x = self.morphers[scale].inverse(x)
         return self.decoder(x)
