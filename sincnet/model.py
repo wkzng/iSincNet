@@ -346,7 +346,7 @@ class SincNet(nn.Module):
             "mel": FilterBankMorpher(self.config, scale="mel")
         })
 
-    def load_pretrained_weights(self, weights_folder:str, freeze:bool=True, device:str="cpu", verbose:bool=True) -> None:
+    def load_pretrained_weights(self, weights_folder:str, freeze:bool=True, device:str="cpu", verbose:bool=False) -> None:
         """ Load pretrained weights for sincnet """
         weights_path = os.path.join(weights_folder, f"{self.name}.ckpt")
         checkpoint = torch.load(weights_path, map_location=torch.device(device))
