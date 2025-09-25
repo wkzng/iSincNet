@@ -233,7 +233,6 @@ class Encoder1d(nn.Module):
             causal=config.causal
         )
         self.register_buffer("filters", filters.unsqueeze(1))
-        self.max_value = 0
 
     def forward(self, wav:torch.Tensor) -> torch.Tensor: 
         """(B, L) or (B, 1, L) -> (B,F,T)"""
@@ -246,7 +245,6 @@ class Encoder1d(nn.Module):
             wav = wav.unsqueeze(1)
         wav = F.pad(wav, (self.padding, self.padding), mode="reflect")
         spectrogram = F.conv1d(wav, weight=weights, bias=None, stride=self.stride, padding=0)
-        self.max_value = max(self.max_value, spectrogram.abs().max().item())
         return spectrogram
     
 
@@ -286,7 +284,7 @@ class Decoder1d(nn.Module):
         x = x.flatten(1)
         
         if self.training:
-            xmax = eps + torch.max(x, dim=1).values.detach().view(-1, 1)
+            xmax = eps + torch.max(x.abs(), dim=1).values.detach().view(-1, 1)
             x = x / xmax
         return x
 
