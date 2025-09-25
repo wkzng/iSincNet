@@ -55,16 +55,11 @@ class Trainer(BaseTrainer):
                     transformed_wav = T(waveforms).squeeze(1)
                     reconstructed_wav, scale_info = self.model(
                         transformed_wav, 
-                        ret_loss=current_epoch>=min_epoch_before_multifb
+                        ret_multifb_loss=current_epoch>=min_epoch_before_multifb
                     )
 
                     transformed_stft = self.stft.compute_log1p_magnitude(transformed_wav)
                     reconstructed_stft = self.stft.compute_log1p_magnitude(reconstructed_wav)
-                    
-                    if current_epoch < 2 * min_epoch_before_multifb:
-                        tempocal_roundtrip_loss = scale_info.pop("tcst", None)
-                        if tempocal_roundtrip_loss:
-                            scale_info["tcst"] = tempocal_roundtrip_loss.item()
 
                     batch_losses = {
                         "tL1": F.l1_loss(transformed_wav, reconstructed_wav),
@@ -136,7 +131,7 @@ if __name__ =="__main__":
     train_config = TrainConfig(**{
         "batch_size": 8,
         "n_epoch": 500,
-        "learning_rate": 1e-3,
+        "learning_rate": 5e-4,
         "weight_decay": 1e-2,
         "training_id": dataset_config.id
     })
