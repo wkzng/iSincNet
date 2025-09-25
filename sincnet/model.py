@@ -166,7 +166,7 @@ def compute_complex_sinc_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, 
     #compte w(x) = 2B * sinc(Bx/2)
     #Note: the implementation torch.sinc = np.sinc corresponds to the normalised sinc defined as sinc(x)=sinc_π(x/π) 
     #Therefore w(x) = 2B * sinc_π(Bx/2π)
-    envelope = (2*B) * torch.sinc((Bx/2) / torch.pi)
+    envelope = torch.sinc((Bx/2) / torch.pi) 
 
     #compute locality window
     window = torch.from_numpy(np.hanning(kernel_size)).float().view(1, -1)
@@ -175,7 +175,7 @@ def compute_complex_sinc_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, 
 
     #normalise the kernel
     weights = vibrations * envelope * window
-    weights = weights / torch.sum(weights.abs(), dim=1).view(-1, 1)
+    weights = weights / torch.sum(weights.abs(), dim=1).max().item()
     return weights
 
 
@@ -270,7 +270,6 @@ class Decoder1d(nn.Module):
     def forward(self, x:torch.Tensor, eps:float=1e-5) -> torch.Tensor:
         """(B,F,T) -> (B, 1, L)"""
         #rescale imputs to [-1,1] and resize the input (if necessary)
-        x = rescale_spectrogram(x)
         x = self.auto_resize(x)
 
         #compensate for the missing component (real or imag) with
@@ -284,9 +283,9 @@ class Decoder1d(nn.Module):
         x = x @ self.Winv
         x = x.flatten(1)
         
-        y = x if self.training else x.abs() 
-        xmax = eps + torch.max(y, dim=1).values.detach().view(-1, 1)
-        x = x / xmax
+        if self.training:
+            xmax = eps + torch.max(x.abs(), dim=1).values.detach().view(-1, 1)
+            x = x / xmax
         return x
 
 
@@ -335,10 +334,9 @@ class FilterBankMorpher(nn.Module):
 
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
-    def __init__(self, config:ModelArgs=None, scale:str="lin"):
+    def __init__(self, config:ModelArgs=None):
         super().__init__()
         self.config = config if config else ModelArgs()
-        self.scale = scale
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config, scale="lin")
         self.decoder = Decoder1d(self.config)
@@ -365,26 +363,24 @@ class SincNet(nn.Module):
                 p.requires_grad = False
         return self
     
-    def encode(self, x:torch.Tensor, scale:str=None) -> torch.Tensor:
+    def encode(self, x:torch.Tensor, scale:str="lin") -> torch.Tensor:
         """Compute the sincNet spectrogram"""
-        scale = scale or self.scale
         x = self.encoder(x)
         if scale != "lin":
             x = self.morphers[scale].morphe(x)
         return x
 
-    def decode(self, x:torch.Tensor, scale:str=None) -> torch.Tensor:
+    def decode(self, x:torch.Tensor, scale:str="lin") -> torch.Tensor:
         """Reconstruct audio from linear sincNet spectrogram"""
-        scale = scale or self.scale
         if scale != "lin":
             x = self.morphers[scale].inverse(x)
         return self.decoder(x)
     
-    def forward(self, x:torch.Tensor, ret_loss:bool=True) -> torch.Tensor:
+    def forward(self, x:torch.Tensor, ret_multifb_loss:bool=True) -> torch.Tensor:
         x_lin = self.encode(x)
 
         scale_info = {}
-        if ret_loss:
+        if ret_multifb_loss:
             loss_morph = 0
             loss_temp_cst = 0
             for _, filterbank in self.morphers.items():
@@ -395,17 +391,9 @@ class SincNet(nn.Module):
                 x_scale_hat = filterbank.morphe(x_lin)
                 loss_morph += F.l1_loss(x_scale_hat, x_scale)
 
-                # roundtrip (lin -> scale -> lin) if consistancy
-                x_lin_hat =  filterbank.inverse(x_scale_hat)
+                # roundtrip (lin -> scale -> lin)
+                x_lin_hat = filterbank.inverse(x_scale_hat)
                 loss_morph += F.l1_loss(x_lin_hat, x_lin)
-
-                # inversion (scale -> lin) if consistancy
-                # x_lin_hat =  filterbank.inverse(x_scale)
-                # loss_morph += F.l1_loss(x_lin_hat, x_lin)
-
-                #roundtrip waveform consistancy in time space
-                x_hat = self.decode(x_lin_hat)
-                loss_temp_cst += F.l1_loss(x_hat, x) + F.mse_loss(x_hat, x)
 
             scale_info["morph"] = loss_morph
             scale_info["tcst"] = loss_temp_cst

@@ -140,8 +140,10 @@ if __name__ == "__main__":
     }
 
     datasets_folders = [
-        #'gtzan_22050/train',
-        'djmax_respectv_22050/train',
+        'gtzan_22050/train',
+        #'djmax_respectv_22050/train',
+        #'ashcraft/train',
+        #'macos_albums/train',
     ]
 
     datasets_config = [
