@@ -79,19 +79,18 @@ def compute_backward_mu_law_companding(x:torch.Tensor, q_bits:int) -> torch.Tens
 def compute_forward_mu_law_quantize(x:torch.Tensor, q_bits:int) -> torch.Tensor:
     """transform tensor with values in [-1,1] into a tensor with values in [0, 2^q_bits-1]"""
     mu = 2**q_bits - 1
-    y = (x + 1)/2
-    z = mu * y + 0.5
-    z = torch.trunc(z).to(torch.long)
-    return z
+    y = (x + 1) / 2.0
+    y = mu * y
+    y = torch.trunc(y).to(torch.long)
+    return y
 
 
 def compute_backward_mu_law_quantize(x:torch.Tensor, q_bits:int) -> torch.Tensor:
     """transform tensor with values in [0, 2^q_bits-1] back into [-1,1]"""
     mu = 2**q_bits - 1
-    z = x.float()
-    y = (z - 0.5) / mu
-    x = 2 * y - 1
-    return x
+    y = x.float() / mu
+    y = 2 * y - 1.0
+    return y
 
 
 def lin_freqs(fs:int, n_bins:int) -> np.ndarray:
@@ -236,15 +235,13 @@ class Encoder1d(nn.Module):
 
     def forward(self, wav:torch.Tensor) -> torch.Tensor: 
         """(B, L) or (B, 1, L) -> (B,F,T)"""
-        if self.component == "real":
-            weights = torch.real(self.filters)
-        else:
-            weights = torch.imag(self.filters)
-
         if len(wav.shape) < 3:
             wav = wav.unsqueeze(1)
         wav = F.pad(wav, (self.padding, self.padding), mode="reflect")
-        spectrogram = F.conv1d(wav, weight=weights, bias=None, stride=self.stride, padding=0)
+
+        weights = self.filters.real if self.component == "real" else self.filters.imag
+        norm = weights.abs().sum(dim=-1).view(-1, 1, 1)
+        spectrogram = F.conv1d(wav, weight=weights/norm, bias=None, stride=self.stride, padding=0)
         return spectrogram
     
 
