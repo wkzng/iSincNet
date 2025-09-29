@@ -24,11 +24,11 @@ class ModelArgs:
             fs = 22050 = 2 * (3*5*7)^2  so interesting candidates for FPS are {45 49 50 63 70 75 90 98 105 126 147 150}
             fs = 16000 = 4^2 * (2*5)^3  so interesting candidates for FPS are {40, 50, 64, 80, 100, 125, 128, 160}
     """
+    component: str 
     fs:int = 16000
     fps: int = 128
     n_bins: int = 128
     q_bits : int = 8
-    component : str = "real"
     causal: bool = True
     neighborhood_radius : int = 4
 
@@ -231,17 +231,41 @@ class Encoder1d(nn.Module):
             scale=scale,
             causal=config.causal
         )
+        filters = self.preprocess_filters(filters)
         self.register_buffer("filters", filters.unsqueeze(1))
 
+
+    def preprocess_filters(self, filters:torch.Tensor) -> torch.Tensor: 
+        """ Pre-normalise the filters so that max spectrogram value <= 1"""
+        assert self.component in ("real", "imag", "complex")
+        if self.component == "real":
+            weights = filters.real
+        elif self.component == "imag":
+            weights = filters.imag
+        else:
+            weights = filters
+
+        norm = weights.abs().sum(dim=-1, keepdim=True)
+        return filters / norm
+
+
     def forward(self, wav:torch.Tensor) -> torch.Tensor: 
-        """(B, L) or (B, 1, L) -> (B,F,T)"""
+        """(B,L) or (B,1,L) → (B,F,T) or (B,F,T) complex"""
         if len(wav.shape) < 3:
             wav = wav.unsqueeze(1)
+        elif wav.size(1) != 1:
+            raise ValueError("Expected mono waveform (B,1,L)")
+        
         wav = F.pad(wav, (self.padding, self.padding), mode="reflect")
-
-        weights = self.filters.real if self.component == "real" else self.filters.imag
-        norm = weights.abs().sum(dim=-1).view(-1, 1, 1)
-        spectrogram = F.conv1d(wav, weight=weights/norm, bias=None, stride=self.stride, padding=0)
+        
+        if self.component == "complex":
+            real = F.conv1d(wav, weight=self.filters.real, bias=None, stride=self.stride, padding=0)
+            imag = F.conv1d(wav, weight=self.filters.imag, bias=None, stride=self.stride, padding=0)
+            spectrogram = torch.cat([real, imag], dim=1)
+        elif self.component == "real":
+            spectrogram = F.conv1d(wav, weight=self.filters.real, bias=None, stride=self.stride, padding=0)
+        else:
+            spectrogram = F.conv1d(wav, weight=self.filters.imag, bias=None, stride=self.stride, padding=0)
         return spectrogram
     
 
@@ -252,23 +276,11 @@ class Decoder1d(nn.Module):
         self.config = config
         self.shifts = config.neighborhood
         self.size = len(self.shifts)
-        self.Winv = nn.Parameter(torch.ones(self.size * config.n_bins, config.hop_length))
+        self.factor = 2 if config.component == "complex" else 1
+        self.Winv = nn.Parameter(torch.ones(self.size * config.n_bins * self.factor, config.hop_length))
     
-    def auto_resize(self, x:torch.Tensor) -> torch.Tensor:
-        """Automatically pad or cut the frequency-axis to meet the dimensions of the inverter"""
-        _, n_bins, _ = x.shape
-        if n_bins > self.config.n_bins:
-            x = x[:,:self.config.n_bins]
-        elif n_bins < self.config.n_bins:
-            pad = self.config.n_bins - n_bins
-            x = F.pad(x, (0, 0, 0, pad))
-        return x
-
     def forward(self, x:torch.Tensor, eps:float=1e-5) -> torch.Tensor:
         """(B,F,T) -> (B, 1, L)"""
-        #rescale imputs to [-1,1] and resize the input (if necessary)
-        x = self.auto_resize(x)
-
         #compensate for the missing component (real or imag) with
         #forward and backward lagged frames projected into the temporal space
         #NOTE: This manual operation of roll_and_mask + linear layer is strictly
@@ -293,7 +305,7 @@ class Quantizer(nn.Module):
         self.vocab_size = 2**q_bits
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
-        x = rescale_spectrogram(x)
+        #x = rescale_spectrogram(x)
         x = compute_forward_mu_law_companding(x, q_bits=self.q_bits)
         x = compute_forward_mu_law_quantize(x, q_bits=self.q_bits)
         return x
@@ -301,7 +313,7 @@ class Quantizer(nn.Module):
     def inverse(self, x:torch.Tensor) -> torch.Tensor:
         x = compute_backward_mu_law_quantize(x, q_bits=self.q_bits)
         x = compute_backward_mu_law_companding(x, q_bits=self.q_bits)
-        x = rescale_spectrogram(x)
+        #x = rescale_spectrogram(x)
         return x
 
 
@@ -309,9 +321,11 @@ class FilterBankMorpher(nn.Module):
     def __init__(self, config:ModelArgs, scale:str):
         super().__init__()
         assert scale != "lin"
+        self.factor = 2 if config.component == "complex" else 1
+        n_bins = config.n_bins * self.factor
         self.encoder = Encoder1d(config, scale=scale)
-        self.morpher = nn.Linear(config.n_bins, config.n_bins, bias=False)
-        self.inverser = nn.Linear(config.n_bins, config.n_bins, bias=False)
+        self.morpher = nn.Linear(n_bins, n_bins, bias=False)
+        self.inverser = nn.Linear(n_bins, n_bins, bias=False)
         #NOTE: For unkown reasons, using Conv1d instead of Linear layer converged slower
         #and toward more slightly hissing white noise in reconstructed waveform.
 
@@ -331,9 +345,10 @@ class FilterBankMorpher(nn.Module):
 
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
-    def __init__(self, config:ModelArgs=None):
+    def __init__(self, component:str="real"):
         super().__init__()
-        self.config = config if config else ModelArgs()
+        self.config = ModelArgs(component=component)
+        self.complex_output = self.config.component == "complex"
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config, scale="lin")
         self.decoder = Decoder1d(self.config)
@@ -360,6 +375,27 @@ class SincNet(nn.Module):
                 p.requires_grad = False
         return self
     
+    def auto_resize(self, x:torch.Tensor) -> torch.Tensor:
+        """Automatically pad or cut the frequency-axis to meet the dimensions of the inverter"""
+        _, n_bins, _ = x.shape
+        target_bins = self.config.n_bins
+        if n_bins > target_bins:
+            x = x[:,:target_bins]
+        elif n_bins < target_bins:
+            pad = target_bins - n_bins
+            x = F.pad(x, (0, 0, 0, pad))
+        return x
+
+    def split_components_or_combine_complex(self, x:torch.Tensor) -> torch.Tensor:
+        """ reshape a spectrogram [real/img] to complex or vise versa"""
+        if self.complex_output:
+            if torch.is_complex(x):
+                x = torch.cat([x.real, x.imag], dim=1)
+            else:
+                real, imag = torch.split(x, self.config.n_bins, dim=1)
+                x = torch.complex(real, imag)
+        return x
+
     def encode(self, x:torch.Tensor, scale:str="lin") -> torch.Tensor:
         """Compute the sincNet spectrogram"""
         x = self.encoder(x)
