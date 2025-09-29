@@ -128,11 +128,12 @@ if __name__ =="__main__":
 
     model = SincNet()
     dataset_config = GTZANConfig()
+    learning_rate = 1e-4
     train_config = TrainConfig(**{
         "batch_size": 8,
         "n_epoch": 500,
-        "learning_rate": 5e-4,
-        "weight_decay": 1e-2,
+        "learning_rate": learning_rate,
+        "weight_decay": learning_rate / 10,
         "training_id": dataset_config.id
     })
 
