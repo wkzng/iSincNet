@@ -3,8 +3,25 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import os
+import librosa
 import numpy as np
 from dataclasses import dataclass, asdict
+
+
+
+def next_power_of_2(x: int) -> int:
+    """ Calculates the smallest power of 2 that is greater than or equal to x.
+        Example:
+            >>> next_power_of_2(100): 128
+            >>> next_power_of_2(64): 64
+    """
+    if x < 0:
+        raise ValueError("Input must be a non-negative integer.")
+    if x == 0:
+        return 1
+    # For a number x, the next power of 2 is 2 raised to the number of bits
+    # in the binary representation of x-1.
+    return 1 << (x - 1).bit_length()
 
 
 
@@ -25,16 +42,19 @@ class ModelArgs:
             fs = 16000 = 4^2 * (2*5)^3  so interesting candidates for FPS are {40, 50, 64, 80, 100, 125, 128, 160}
     """
     component: str 
+    causal: bool
+    fps: int
     fs:int = 16000
-    fps: int = 128
-    n_bins: int = 128
     q_bits : int = 8
-    causal: bool = True
     neighborhood_radius : int = 4
 
     @property
     def args(self) -> dict:
         return asdict(self)
+
+    @property
+    def n_bins(self) -> int:
+        return next_power_of_2(self.fs // self.fps)
 
     @property
     def n_fft(self) -> int:
@@ -95,33 +115,34 @@ def compute_backward_mu_law_quantize(x:torch.Tensor, q_bits:int) -> torch.Tensor
 
 def lin_freqs(fs:int, n_bins:int) -> np.ndarray:
     """The transform function is identity"""
-    return np.linspace(0, fs//2, n_bins)
+    fmin = 0
+    fmax = fs // 2
+    centers = np.linspace(fmin, fmax, n_bins)
+
+    fstep = centers[1] - centers[0]
+    edges = np.append(centers, fmax + fstep)
+
+    bands = np.diff(edges)
+    return centers, bands
 
 
 def mel_freqs(fs:int, n_bins:int) -> np.ndarray:
     """The transform function is MEL"""
-    a = 2595 / np.log(10)
-    b = 700
-    forward = lambda f : a * np.log(1 + f/b)
-    backward = lambda z : b * (np.exp(z/a) - 1)
     fmin = 0
-    fmax = fs//2
-    return backward(np.linspace(forward(fmin), forward(fmax), n_bins))
-    
+    fmax = fs // 2
 
-def get_zero_overlap_band(freq_hz:np.ndarray, fs:float) -> np.ndarray:
-    """ Adaptive computation of bands to remove any whole"""
-    n = len(freq_hz)
-    edges = []
-    for k in range(1, n):
-        right = (freq_hz[k] + freq_hz[k-1]) / 2
-        edges.append(right)
+    fmin = librosa.hz_to_mel(fmin)
+    fmax = librosa.hz_to_mel(fmax)
+    centers_mel = np.linspace(fmin, fmax, n_bins)
+
+    mel_step  = centers_mel[1] - centers_mel[0]
+    edges_mel = np.linspace(centers_mel[0] - mel_step / 2, centers_mel[-1] + mel_step / 2, n_bins + 1)
+
+    centers = librosa.mel_to_hz(centers_mel, htk=False)
+    edges = librosa.mel_to_hz(edges_mel, htk=False)
     
-    edges = [0] + edges + [freq_hz[-1]]
-    edges = np.asarray(edges)
-    bands = edges[1:] - edges[:-1]
-    assert np.isclose(bands.sum(), fs/2.0, rtol=1e-5)
-    return bands[1:]
+    bands = np.diff(edges)
+    return centers, bands
 
 
 def compute_complex_sinc_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causal:bool) -> torch.Tensor:
@@ -139,18 +160,14 @@ def compute_complex_sinc_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, 
     """
     #compute oscillatory frequencies (the zeroth-will be removed later)
     if scale == "lin":
-        freq_hz = lin_freqs(fs=fs, n_bins=n_bins + 1)
+        freq_hz, band_hz = lin_freqs(fs=fs, n_bins=n_bins)
     elif scale == "mel":
-        freq_hz = mel_freqs(fs=fs, n_bins=n_bins + 1)
+        freq_hz, band_hz = mel_freqs(fs=fs, n_bins=n_bins)
     else:
         raise ValueError("Only lin, mel scales are supported for the SincNet Kernel")
     
-    #compute bandwidths with sanity check
-    #band_hz = get_zero_overlap_band(freq_hz, fs)
-    band_hz = np.diff(freq_hz)
-
     #compute parametric centers and width tensors
-    F = torch.from_numpy(freq_hz[1:]).float().view(-1, 1)
+    F = torch.from_numpy(freq_hz).float().view(-1, 1)
     B = torch.from_numpy(band_hz).float().view(-1, 1)
 
     #compute time intervals
@@ -194,28 +211,6 @@ def roll_and_mask(x:torch.Tensor, k:int) -> torch.Tensor:
         x[:, :k, :] = 0
     return x
 
-
-def rescale_spectrogram(spectrogram:torch.Tensor, eps:float=1e-12) -> torch.Tensor:
-    """ Rescale a spectrogram to use the fully range [-1, 1] for the values
-        This operation is required to stabilise computations in mu-law companding
-        and on the decoder (prevent algebra with too small values)
-
-        Caveats: this operation breaks the linearity of the spectrogram w.r.t components
-        If a signal is decomposed: w = w1 + w2
-        Then:
-            s1 = sincnet(w1)
-            s2 = sincnet(w2)
-            s  = sincnet(w1 + w2) = s1 + s2
-
-        However linearity is generaly lost when using rescaling.
-            rescaled(s) = s / s_max
-                        = (s1 + s2) / s_max
-                        = ( rescaled(s1) * s1_max + rescaled(s2) * s2_max ) / s_max
-                        = (s1_max/s_max) * rescaled(s1) + (s2_max/s_max) * rescaled(s2)
-    """
-    spectrogram_max_value = eps + torch.max(spectrogram.abs().flatten(1), dim=1).values.detach().view(-1, 1, 1)
-    spectrogram = spectrogram / spectrogram_max_value
-    return spectrogram
 
 
 class Encoder1d(nn.Module):
@@ -284,17 +279,13 @@ class Decoder1d(nn.Module):
         #compensate for the missing component (real or imag) with
         #forward and backward lagged frames projected into the temporal space
         #NOTE: This manual operation of roll_and_mask + linear layer is strictly
-        #equivalent to a 1d convolution with appropriate kernel size but for unkown
+        #equivalent to a 1d convolution with appropriate kernel size but for unknown
         #reasons, using linear layer produced more stable results
         x = x.transpose(1,2) #(B,T,F)
         x = [roll_and_mask(x=x, k=k) for k in self.shifts]
         x = torch.cat(x, dim=-1)
         x = x @ self.Winv
-        x = x.flatten(1)
-        
-        if self.training:
-            xmax = eps + torch.max(x.abs(), dim=1).values.detach().view(-1, 1)
-            x = x / xmax
+        x = x.flatten(1).tanh()
         return x
 
 
@@ -305,7 +296,6 @@ class Quantizer(nn.Module):
         self.vocab_size = 2**q_bits
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
-        #x = rescale_spectrogram(x)
         x = compute_forward_mu_law_companding(x, q_bits=self.q_bits)
         x = compute_forward_mu_law_quantize(x, q_bits=self.q_bits)
         return x
@@ -313,7 +303,6 @@ class Quantizer(nn.Module):
     def inverse(self, x:torch.Tensor) -> torch.Tensor:
         x = compute_backward_mu_law_quantize(x, q_bits=self.q_bits)
         x = compute_backward_mu_law_companding(x, q_bits=self.q_bits)
-        #x = rescale_spectrogram(x)
         return x
 
 
@@ -345,9 +334,9 @@ class FilterBankMorpher(nn.Module):
 
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
-    def __init__(self, component:str="real"):
+    def __init__(self, component:str="real", causal:bool=True, fps:int=128):
         super().__init__()
-        self.config = ModelArgs(component=component)
+        self.config = ModelArgs(component=component, causal=causal, fps=fps)
         self.complex_output = self.config.component == "complex"
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config, scale="lin")
