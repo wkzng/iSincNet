@@ -14,17 +14,16 @@ from datasets.utils.waveform import WaveformLoader
 
 
 class ChunkDatasetIterator:
-    def __init__(self, dataset_path:str, chunk_length:int, hop_length:int, sample_rate:int):
+    def __init__(self, dataset_path:str, target_loudness_lufs:float, n_channels:int, chunk_length:int, hop_length:int, sample_rate:int):
         self.dataset_path = Path(dataset_path)
         self.name = self.dataset_path.parent.name
         self.split = self.dataset_path.name
+        self.target_loudness_lufs = target_loudness_lufs
+        self.n_channels = n_channels #1=mono, 2=stereo
         self.chunk_length = chunk_length  # seconds
         self.hop_length = hop_length      # seconds
         self.sr = sample_rate
-        self.loader = WaveformLoader(
-            sample_rate=sample_rate, 
-            chunk_duration=self.chunk_length
-        ) 
+        self.loader = WaveformLoader(sample_rate=sample_rate, ) 
         self.tracks = [p for p in self.dataset_path.iterdir() if p.is_file()]
 
 
@@ -38,25 +37,40 @@ class ChunkDatasetIterator:
 
         for track in tqdm(self.tracks, ncols=80, total=len(self.tracks), leave=False):
             # one hop-sized chunk stream per stem
-            stream = self.loader.stream(
-                query=track.as_posix(),
-                offset=0.0,
-                chunk_duration=self.hop_length,
+            audio = self.loader.load_audio(
+                audio_path=track.as_posix(),
+                nchannels=self.n_channels
             )
 
+            #skip pathological cases
+            if audio is None:
+                continue
+            
+            loudness = self.loader.measure_loudness(audio)
+            audio = self.loader.normalise_loudness(
+                audio, 
+                original_lufs=loudness, 
+                target_lufs=self.target_loudness_lufs
+            )
+            stream = self.loader.get_chunks(
+                audio=audio, 
+                chunk_duration=self.chunk_length, 
+                hop_duration=self.hop_length
+            )
+    
             # initialise buffers per stem (primed to first full window)
             buffer = deque(maxlen=n_chunks_required)
             
             while True:
                 # reach the chunks
                 try:
-                    chunk = np.asarray(next(stream), dtype=np.float32)
-                    if len(chunk) < hop_samples:
+                    chunk = next(stream)
+                    if chunk.shape[-1] < hop_samples:
                         raise StopIteration
                     buffer.append(chunk)
                 except StopIteration:
                     break
-        
+                
                 # skip if the buffers are to small
                 if not (len(buffer) == n_chunks_required):
                     continue
@@ -64,7 +78,6 @@ class ChunkDatasetIterator:
                 # generate a train or test sample
                 wav = np.concatenate(buffer)
                 wav = wav[:chunk_samples]
-                wav = self.loader.transform(wav, target_duration=self.chunk_length)
                 yield {"audio": wav}
 
 
@@ -133,14 +146,16 @@ if __name__ == "__main__":
     CHUNK_DURATION = int(os.getenv("CHUNK_DURATION"))
     HOP_LENGTH = int(os.getenv("HOP_LENGTH"))
     N_SAMPLES = int(SAMPLE_RATE * CHUNK_DURATION)
+    N_CHANNELS = 1
+    TARGET_LUFFS = -23
     ROOT = os.getenv("ROOT_DIRECTORY")
 
     buffer_schemas = {
-        "audio": (1, N_SAMPLES), 
+        "audio": (N_CHANNELS, N_SAMPLES), 
     }
 
     datasets_folders = [
-        'gtzan_22050/train',
+        'gtzan/train',
         #'djmax_respectv_22050/train',
         #'ashcraft/train',
         #'macos_albums/train',
@@ -148,10 +163,12 @@ if __name__ == "__main__":
 
     datasets_config = [
         {
-            'dataset_path':  os.path.join(ROOT, folder), 
+            'dataset_path': os.path.join(ROOT, folder), 
             'chunk_length': CHUNK_DURATION, 
             "hop_length": HOP_LENGTH, 
             "sample_rate": SAMPLE_RATE,
+            "n_channels": N_CHANNELS,
+            "target_loudness_lufs": TARGET_LUFFS
         }
         for folder in datasets_folders
     ]
