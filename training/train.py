@@ -26,13 +26,21 @@ class Trainer(BaseTrainer):
         self.amp_enabled = self.device == "cuda"
 
 
+    def energy(self, x: torch.Tensor, dim: int = -1, keepdim: bool = True) -> torch.Tensor:
+        """Calculates the energy (sum of squares) of a tensor along a dimension."""
+        return torch.mean(x**2, dim=dim, keepdim=keepdim)
+
+
     def train_one_epoch(self, current_epoch:int):
         """evaluate the model on the train dataset"""
         self.model.train()
         n_batches = len(self.train_loader)
         lr = self.scheduler.get_lr()[0]
         progress_bar = tqdm(enumerate(self.train_loader), ncols=200, total=n_batches, disable=False)
-        min_epoch_before_multifb = 20
+
+        min_epoch_before_multifb = 10
+        if current_epoch == min_epoch_before_multifb:
+            model.freeze_autoencoder()
 
         for b_idx, batch in progress_bar:
             #transforms = self.audio_augmenter.get_random_transforms(k=3)
@@ -58,12 +66,16 @@ class Trainer(BaseTrainer):
                         ret_multifb_loss=current_epoch>=min_epoch_before_multifb
                     )
 
+                    transformed_nrj = self.energy(transformed_wav)
+                    reconstructed_nrj = self.energy(reconstructed_wav)
+
                     transformed_stft = self.stft.compute_log1p_magnitude(transformed_wav)
                     reconstructed_stft = self.stft.compute_log1p_magnitude(reconstructed_wav)
 
                     batch_losses = {
-                        "tL1": F.l1_loss(transformed_wav, reconstructed_wav),
-                        "tL2": F.mse_loss(transformed_wav, reconstructed_wav),
+                        "tL1": F.l1_loss(reconstructed_wav, transformed_wav),
+                        "tL2": F.mse_loss(reconstructed_wav, transformed_wav),
+                        "nrj": F.mse_loss(reconstructed_nrj, transformed_nrj).detach(),
                         "msl": F.l1_loss(transformed_stft, reconstructed_stft),
                         **scale_info
                     }
@@ -127,8 +139,9 @@ if __name__ =="__main__":
     from sincnet.model import SincNet
 
     model = SincNet()
-    dataset_config = GTZANConfig()
-    learning_rate = 1e-4
+    #model.freeze_autoencoder()
+    dataset_config = GTZANConfig(id="gtzan")
+    learning_rate = 1e-3
     train_config = TrainConfig(**{
         "batch_size": 8,
         "n_epoch": 500,

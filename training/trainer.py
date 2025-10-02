@@ -150,8 +150,8 @@ class BaseTrainer:
                 checkpoint = torch.load(ckpt_path, map_location=self.device)
                 #self.model.load_state_dict(checkpoint.pop("state_dict"))
                 custom_load_state_dict(self.model, checkpoint.pop("state_dict"))
-                self.optimizer.load_state_dict(checkpoint.pop("optimizer_state"))
-                self.scheduler.load_state_dict(checkpoint.pop("scheduler_state"))
+                #self.optimizer.load_state_dict(checkpoint.pop("optimizer_state"))
+                #self.scheduler.load_state_dict(checkpoint.pop("scheduler_state"))
                 print(f"Loaded checkpoint from {ckpt_path}...")
                 return checkpoint
             except:

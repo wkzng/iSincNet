@@ -28,24 +28,29 @@ import numpy as np
 import librosa
 import torch
 from sincnet.model import SincNet, Quantizer
+from datasets.utils.waveform import WaveformLoader 
 
 # load the model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = SincNet().load_pretrained_weights().eval().to(device)
+processor = WaveformLoader(sample_rate=SAMPLE_RATE) 
 
 # encode and decode an audio waveform
 sample_rate = 16_000
 duration = 5
 offset = 0
-audio_file = ... 
-audio_data, _ = librosa.load(audio_file, sr=sample_rate, duration=duration, offset=offset)
+audio_path = ... 
+waveform = audio_loader.load_segment(audio_path, offset=0, duration=5, nchannels=1)
+loudness = audio_loader.measure_loudness(waveform)
+waveform = audio_loader.normalise_loudness(waveform, loudness, target_lufs=-23)
 
-audio_tensor = torch.from_numpy(audio_data).to(device).float()
-spectrogram = model.encode(audio_tensor.unsqueeze(0), scale="mel")
-reconstructed_audio_tensor = model.decode(spectrogram)
+with torch.no_grad():
+  audio_tensor = torch.from_numpy(waveform).to(device).float()
+  spectrogram = model.encode(audio_tensor.unsqueeze(0), scale="mel")
+  reconstructed_audio_tensor = model.decode(spectrogram, scale="mel")
 
-#(optional) elementwise tokenization into a vocabulary of size 2^{q_bits}
-quantizer = Quantizer(q_bits=8).to(device)
+#(optional) elementwise quantization into a vocabulary of size 2^{q_bits}
+quantizer = Quantizer(q_bits=10).to(device)
 indices = quantizer(spectrogram)
 detokenized_spectrogram = tokenizer.inverse(indices)
 detokenized_audio = model.decode(detokenized_spectrogram)
