@@ -16,3 +16,4 @@ tables
 pandas
 pyarrow
 torchinfo
+pyloudnorm
