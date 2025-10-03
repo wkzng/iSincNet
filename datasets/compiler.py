@@ -4,6 +4,7 @@ import os
 from tqdm import tqdm
 import pandas as pd
 from collections import deque
+import compress_json
 
 import dotenv
 dotenv.load_dotenv()
@@ -25,7 +26,7 @@ class ChunkDatasetIterator:
         self.sr = sample_rate
         self.loader = WaveformLoader(sample_rate=sample_rate, ) 
         self.tracks = [p for p in self.dataset_path.iterdir() if p.is_file()]
-
+        self.peaks = []
 
     def __len__(self):
         return len(self.tracks)
@@ -52,12 +53,12 @@ class ChunkDatasetIterator:
                 original_lufs=loudness, 
                 target_lufs=self.target_loudness_lufs
             )
+            self.peaks.append(np.max(np.abs(audio)))
             stream = self.loader.get_chunks(
                 audio=audio, 
                 chunk_duration=self.chunk_length, 
                 hop_duration=self.hop_length
             )
-    
             # initialise buffers per stem (primed to first full window)
             buffer = deque(maxlen=n_chunks_required)
             
@@ -85,9 +86,31 @@ class ChunkDatasetIterator:
 class MultiDatasetIterator:
     def __init__(self, datasets_config:list[dict], max_samples_per_dataset:int=None):
         self.max_samples_per_dataset = max_samples_per_dataset
-        self.datasets = []
+        self.datasets : list[ChunkDatasetIterator] = []
         for config in datasets_config:
             self.datasets.append(ChunkDatasetIterator(**config))
+
+    def compute_peaks_stats(self) -> dict:
+        peaks = []
+        for dataset in self.datasets:
+            peaks.extend(dataset.peaks)
+        stats = {
+            'mean': np.mean(peaks),
+            'std': np.std(peaks),
+            'p95': np.percentile(peaks, 95),
+            'p99': np.percentile(peaks, 99),
+            'max': np.max(peaks)
+        }
+        print(f"Peak statistics:")
+        print(f"  Mean: {stats['mean']:.3f}")
+        print(f"  95th percentile: {stats['p95']:.3f}")
+        print(f"  99th percentile: {stats['p99']:.3f}")
+        print(f"  Max observed: {stats['max']:.3f}")
+        results = {
+            "peaks": peaks,
+            "stats": stats
+        }
+        return results
     
     def __iter__(self):
         progress_bar = tqdm(self.datasets, ncols=100, disable=False)
@@ -107,13 +130,14 @@ class MultiDatasetIterator:
                 #print(index, self.max_samples_per_dataset)
                 if self.max_samples_per_dataset and index >= self.max_samples_per_dataset:
                     break
-
+                        
 
 class Compiler:
-    def __init__(self, compilation_file:str, iterator:MultiDatasetIterator, writer:H5Writer):
+    def __init__(self, compilation_file:str, peaks_file:str, iterator:MultiDatasetIterator, writer:H5Writer):
         self.iterator = iterator
         self.writer = writer
         self.compilation_file = compilation_file
+        self.peaks_file = peaks_file
 
     def run(self, max_samples:int=None):
         print("[Compilation][full data] starting...")
@@ -135,6 +159,7 @@ class Compiler:
                 break
 
         pd.DataFrame(rows).to_parquet(self.compilation_file)
+        compress_json.dump(self.iterator.compute_peaks_stats(), peaks_file)
         print("[Compilation] completed...")
 
 
@@ -179,13 +204,14 @@ if __name__ == "__main__":
 
     h5_file = os.path.join(compile_dir, f"{compile_name}_fs{SAMPLE_RATE}.hdf5")
     compilation_file = os.path.join(compile_dir, f"{compile_name}_fs{SAMPLE_RATE}.parquet")
+    peaks_file = os.path.join(compile_dir, f"{compile_name}_fs{SAMPLE_RATE}.peaks.json")
 
     max_samples_per_dataset = None
     iterator = MultiDatasetIterator(datasets_config, max_samples_per_dataset=max_samples_per_dataset)
 
     writer = H5Writer(file_path=h5_file, buffer_schemas=buffer_schemas)
     try:
-        compiler = Compiler(compilation_file=compilation_file, iterator=iterator, writer=writer)
+        compiler = Compiler(compilation_file=compilation_file, peaks_file=peaks_file, iterator=iterator, writer=writer)
         compiler.run()
     finally:
         writer.close()
