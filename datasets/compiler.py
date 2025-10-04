@@ -24,7 +24,7 @@ class ChunkDatasetIterator:
         self.chunk_length = chunk_length  # seconds
         self.hop_length = hop_length      # seconds
         self.sr = sample_rate
-        self.loader = WaveformLoader(sample_rate=sample_rate, ) 
+        self.loader = WaveformLoader(sample_rate=sample_rate) 
         self.tracks = [p for p in self.dataset_path.iterdir() if p.is_file()]
         self.peaks = []
 
