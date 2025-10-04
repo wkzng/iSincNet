@@ -113,15 +113,8 @@ class WaveformLoader:
             
             # Step 4: Reshape the flat array into (samples, channels) using the file's metadata.
             num_channels = decoded_file.nchannels
-            num_frames = decoded_file.num_frames
-            waveform_shaped = waveform_flat.reshape(num_frames, num_channels)
-
-            # Step 5: Transpose to get the desired (channels, samples) layout
-            if waveform_shaped.ndim > 1:
-                waveform = waveform_shaped.T
-            else:
-                waveform = np.expand_dims(waveform_shaped, axis=0)
-                
+            n_samples = decoded_file.num_frames
+            waveform = waveform_flat.reshape(n_samples, num_channels).T
             return waveform
             
         except Exception as e:
@@ -132,9 +125,18 @@ class WaveformLoader:
     def stream(self, query:str|bytes, offset:float=0, chunk_duration:float=5, nchannels:int=2) -> Generator:
         """ read chunks from a large audio file """
         params = {"query":query, "sample_rate":self.sr, "duration":chunk_duration, "offset":offset, "channels":nchannels}
-        if isinstance(query, bytes) or query.endswith((".m4a", ".aac")):
-            return stream_ffmpeg(**params)
-        return stream_miniaudio(**params)
+        stream = stream_miniaudio(**params)
+
+        #n_samples = int(self.sr * chunk_duration)
+        for waveform_flat in stream:
+            waveform = np.asarray(waveform_flat)
+            n_points = len(waveform)
+
+            assert n_points % nchannels == 0
+            n_samples = n_points // nchannels
+            
+            waveform = waveform.reshape(n_samples, nchannels).T
+            yield waveform
     
 
     def load_segment(self, audio_path: str, duration: float,  offset: float=0, nchannels:int=2) -> np.ndarray:
@@ -151,20 +153,8 @@ class WaveformLoader:
         """
         try:
             stream = self.stream(query=audio_path, offset=offset, chunk_duration=duration, nchannels=nchannels)
-            waveform_flat = next(stream)
-            waveform_flat = np.asarray(waveform_flat)
+            waveform = next(stream)
             del stream
-
-            # Step 3: Convert the buffer to a NumPy array, same as in load_audio.
-            #waveform_flat = np.frombuffer(decoded_file.samples, dtype=np.float32)
-            waveform_shaped = waveform_flat.reshape(-1, nchannels)
-
-            if waveform_shaped.ndim > 1:
-                waveform = waveform_shaped.T
-            else:
-                waveform = np.expand_dims(waveform_shaped, axis=0)
-
-            # Step 4: Slice the loaded waveform to the desired duration.
             return waveform
         except Exception as e:
             print(f"Error loading segment from {audio_path}: {e}")
