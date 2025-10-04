@@ -10,5 +10,6 @@ training/tensorboard_logs
 */trainings*
 logs/
 datasets/compiled/
-*.png
 Makefile
+*.png
+*.zip
