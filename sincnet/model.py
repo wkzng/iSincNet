@@ -285,7 +285,7 @@ class Decoder1d(nn.Module):
         x = [roll_and_mask(x=x, k=k) for k in self.shifts]
         x = torch.cat(x, dim=-1)
         x = x @ self.Winv
-        x = x.flatten(1).tanh()
+        x = x.flatten(1)
         return x
 
 
