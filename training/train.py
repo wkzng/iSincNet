@@ -38,10 +38,6 @@ class Trainer(BaseTrainer):
         lr = self.scheduler.get_lr()[0]
         progress_bar = tqdm(enumerate(self.train_loader), ncols=200, total=n_batches, disable=False)
 
-        min_epoch_before_multifb = 10
-        if current_epoch == min_epoch_before_multifb:
-            model.freeze_autoencoder()
-
         for b_idx, batch in progress_bar:
             #transforms = self.audio_augmenter.get_random_transforms(k=3)
             transforms = [self.audio_augmenter.transforms[0]]
@@ -61,10 +57,7 @@ class Trainer(BaseTrainer):
                 #print("\n================")
                 for T in transforms:
                     transformed_wav = T(waveforms).squeeze(1)
-                    reconstructed_wav, scale_info = self.model(
-                        transformed_wav, 
-                        ret_multifb_loss=current_epoch>=min_epoch_before_multifb
-                    )
+                    reconstructed_wav = self.model(transformed_wav)
 
                     transformed_nrj = self.energy(transformed_wav)
                     reconstructed_nrj = self.energy(reconstructed_wav)
@@ -77,7 +70,6 @@ class Trainer(BaseTrainer):
                         "tL2": F.mse_loss(reconstructed_wav, transformed_wav),
                         "nrj": F.mse_loss(reconstructed_nrj, transformed_nrj).detach(),
                         "msl": F.l1_loss(transformed_stft, reconstructed_stft),
-                        **scale_info
                     }
                     for k, value in batch_losses.items():
                         if isinstance(value, torch.Tensor) and torch.isfinite(value):
@@ -139,7 +131,6 @@ if __name__ =="__main__":
     from sincnet.model import SincNet
 
     model = SincNet()
-    #model.freeze_autoencoder()
     dataset_config = GTZANConfig(id="gtzan")
     learning_rate = 1e-3
     train_config = TrainConfig(**{
