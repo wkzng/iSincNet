@@ -43,10 +43,11 @@ class ModelArgs:
     """
     component: str 
     causal: bool
+    scale: str
     fps: int
     fs:int = 16000
     q_bits : int = 8
-    neighborhood_radius : int = 4
+    neighborhood_radius : int = 2
 
     @property
     def args(self) -> dict:
@@ -71,7 +72,7 @@ class ModelArgs:
     @property
     def model_id(self) -> str:
         causal = "causal" if self.causal else "ncausal"
-        return f"{self.fs}fs_{self.fps}fps_{self.n_bins}bins_{self.component}_{causal}"
+        return f"{self.fs}fs_{self.fps}fps_{self.n_bins}bins_{self.scale}_{self.component}_{causal}"
     
     @property
     def neighborhood(self) -> list[int]:
@@ -145,7 +146,7 @@ def mel_freqs(fs:int, n_bins:int) -> np.ndarray:
     return centers, bands
 
 
-def compute_complex_sinc_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causal:bool) -> torch.Tensor:
+def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causal:bool, apply_sinc:bool=False) -> torch.Tensor:
     """ Compute real and imaginary part of sinc kernels
             r(x) = 2a*sinc(ax) - 2b*sinc(bx)  with x=2πt
 
@@ -166,23 +167,23 @@ def compute_complex_sinc_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, 
     else:
         raise ValueError("Only lin, mel scales are supported for the SincNet Kernel")
     
-    #compute parametric centers and width tensors
-    F = torch.from_numpy(freq_hz).float().view(-1, 1)
-    B = torch.from_numpy(band_hz).float().view(-1, 1)
-
     #compute time intervals
     t = torch.linspace(-1/2, 1/2, steps=kernel_size).view(1,-1) * kernel_size / fs
     x = 2 * torch.pi * t
-    Fx = torch.matmul(F, x)
-    Bx = torch.matmul(B, x)
     
     #compute oscillatory mode exp(i*Fx)
+    F = torch.from_numpy(freq_hz).float().view(-1, 1)
+    Fx = torch.matmul(F, x)
     vibrations = torch.exp(1j * Fx)
 
-    #compte w(x) = 2B * sinc(Bx/2)
-    #Note: the implementation torch.sinc = np.sinc corresponds to the normalised sinc defined as sinc(x)=sinc_π(x/π) 
-    #Therefore w(x) = 2B * sinc_π(Bx/2π)
-    envelope = torch.sinc((Bx/2) / torch.pi) 
+    envelope = 1
+    if apply_sinc:
+        #compte w(x) = 2B * sinc(Bx/2)
+        #Note: the implementation torch.sinc = np.sinc corresponds to the normalised sinc defined as sinc(x)=sinc_π(x/π) 
+        #Therefore w(x) = 2B * sinc_π(Bx/2π)
+        B = torch.from_numpy(band_hz).float().view(-1, 1)
+        Bx = torch.matmul(B, x)
+        envelope = torch.sinc((Bx/2) / torch.pi) 
 
     #compute locality window
     window = torch.from_numpy(np.hanning(kernel_size)).float().view(1, -1)
@@ -195,23 +196,6 @@ def compute_complex_sinc_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, 
     return weights
 
 
-def roll_and_mask(x:torch.Tensor, k:int) -> torch.Tensor:
-    """ Roll and mask values of a (B,T,C) tensor and mask with zeros 
-        k > 0: past is pushed to the present (conserves causality)
-            torch.roll([1,2,3,4,5], shifts=2) --> [4,5,1,2,3] --> [0,0,1,2,3]
-        k < 0: the future is pushed the the present (breach of causality)
-            torch.roll([1,2,3,4,5], shifts=-2) --> [3,4,5,1,2] --> [3,4,5,0,0]
-    """
-    if k == 0:
-        return x
-    x = torch.roll(x, shifts=k, dims=1)
-    if k < 0:
-        x[:, k:, :] = 0
-    else:
-        x[:, :k, :] = 0
-    return x
-
-
 
 class Encoder1d(nn.Module):
     def __init__(self, config:ModelArgs, scale:str):
@@ -219,7 +203,7 @@ class Encoder1d(nn.Module):
         self.stride = config.hop_length
         self.padding = config.kernel_size // 2
         self.component = config.component
-        filters = compute_complex_sinc_kernel(
+        filters = compute_complex_kernel(
             kernel_size=config.kernel_size,
             fs=config.fs,
             n_bins=config.n_bins,
@@ -272,21 +256,21 @@ class Decoder1d(nn.Module):
         self.shifts = config.neighborhood
         self.size = len(self.shifts)
         self.factor = 2 if config.component == "complex" else 1
-        self.Winv = nn.Parameter(torch.ones(self.size * config.n_bins * self.factor, config.hop_length))
+        self.conv1d = nn.Conv1d(
+            self.factor * config.n_bins, 
+            config.hop_length, 
+            kernel_size=self.size,
+            padding=self.size//2, 
+            bias=False
+        )
+        self.conv1d.weight.data = torch.ones_like(self.conv1d.weight.data)
     
     def forward(self, x:torch.Tensor, eps:float=1e-5) -> torch.Tensor:
         """(B,F,T) -> (B, 1, L)"""
-        #compensate for the missing component (real or imag) with
-        #forward and backward lagged frames projected into the temporal space
-        #NOTE: This manual operation of roll_and_mask + linear layer is strictly
-        #equivalent to a 1d convolution with appropriate kernel size but for unknown
-        #reasons, using linear layer produced more stable results
-        x = x.transpose(1,2) #(B,T,F)
-        x = [roll_and_mask(x=x, k=k) for k in self.shifts]
-        x = torch.cat(x, dim=-1)
-        x = x @ self.Winv
+        x = self.conv1d(x).transpose(1,2)
         x = x.flatten(1)
         return x
+
 
 
 class Quantizer(nn.Module):
@@ -306,44 +290,16 @@ class Quantizer(nn.Module):
         return x
 
 
-class FilterBankMorpher(nn.Module):
-    def __init__(self, config:ModelArgs, scale:str):
-        super().__init__()
-        assert scale != "lin"
-        self.factor = 2 if config.component == "complex" else 1
-        n_bins = config.n_bins * self.factor
-        self.encoder = Encoder1d(config, scale=scale)
-        self.morpher = nn.Linear(n_bins, n_bins, bias=False)
-        self.inverser = nn.Linear(n_bins, n_bins, bias=False)
-        #NOTE: For unkown reasons, using Conv1d instead of Linear layer converged slower
-        #and toward more slightly hissing white noise in reconstructed waveform.
-
-    def encode(self, x):
-        return self.encoder(x)
-
-    def morphe(self, x):
-        """(B,F,T) -> (B,F,T)"""
-        x = self.morpher(x.transpose(1,2)).transpose(1,2)
-        return x
-    
-    def inverse(self, x):
-        """(B,F,T) -> (B,F,T)"""
-        x = self.inverser(x.transpose(1,2)).transpose(1,2)
-        return x 
-
 
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
-    def __init__(self, component:str="real", causal:bool=True, fps:int=128):
+    def __init__(self, component:str="real", causal:bool=True, scale:str="lin", fps:int=128):
         super().__init__()
-        self.config = ModelArgs(component=component, causal=causal, fps=fps)
+        self.config = ModelArgs(component=component, scale=scale, causal=causal, fps=fps)
         self.complex_output = self.config.component == "complex"
         self.name = self.config.model_id
-        self.encoder = Encoder1d(self.config, scale="lin")
+        self.encoder = Encoder1d(self.config, scale=scale)
         self.decoder = Decoder1d(self.config)
-        self.morphers = nn.ModuleDict({
-            "mel": FilterBankMorpher(self.config, scale="mel")
-        })
 
     def load_pretrained_weights(self, weights_folder:str, freeze:bool=True, device:str="cpu", verbose:bool=False) -> None:
         """ Load pretrained weights for sincnet """
@@ -385,43 +341,18 @@ class SincNet(nn.Module):
                 x = torch.complex(real, imag)
         return x
 
-    def encode(self, x:torch.Tensor, scale:str="lin") -> torch.Tensor:
+    def encode(self, x:torch.Tensor) -> torch.Tensor:
         """Compute the sincNet spectrogram"""
-        x = self.encoder(x)
-        if scale != "lin":
-            x = self.morphers[scale].morphe(x)
-        return x
+        return self.encoder(x)
 
-    def decode(self, x:torch.Tensor, scale:str="lin") -> torch.Tensor:
+    def decode(self, x:torch.Tensor) -> torch.Tensor:
         """Reconstruct audio from linear sincNet spectrogram"""
-        if scale != "lin":
-            x = self.morphers[scale].inverse(x)
         return self.decoder(x)
     
-    def forward(self, x:torch.Tensor, ret_multifb_loss:bool=True) -> torch.Tensor:
-        x_lin = self.encode(x)
-
-        scale_info = {}
-        if ret_multifb_loss:
-            loss_morph = 0
-            loss_temp_cst = 0
-            for _, filterbank in self.morphers.items():
-                filterbank: FilterBankMorpher = filterbank
-                x_scale = filterbank.encode(x).detach()
-
-                # morphing consistancy (lin -> scale)
-                x_scale_hat = filterbank.morphe(x_lin)
-                loss_morph += F.l1_loss(x_scale_hat, x_scale)
-
-                # roundtrip (lin -> scale -> lin)
-                x_lin_hat = filterbank.inverse(x_scale_hat)
-                loss_morph += F.l1_loss(x_lin_hat, x_lin)
-
-            scale_info["morph"] = loss_morph
-            scale_info["tcst"] = loss_temp_cst
-
-        x = self.decode(x_lin)
-        return x, scale_info
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
+        x = self.encode(x)
+        x = self.decode(x)
+        return x
 
 
 

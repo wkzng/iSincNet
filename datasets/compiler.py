@@ -181,9 +181,9 @@ if __name__ == "__main__":
 
     datasets_folders = [
         'gtzan/train',
-        #'djmax_respectv_22050/train',
-        #'ashcraft/train',
-        #'macos_albums/train',
+        'mvsep_multisong_dataset/train',
+        'mvsep_synth_dataset/train',
+        'djmax_respectv_22050/train',
     ]
 
     datasets_config = [
@@ -198,7 +198,7 @@ if __name__ == "__main__":
         for folder in datasets_folders
     ]
 
-    compile_name = "gtzan"
+    compile_name = "mixture"
     compile_dir = os.path.join(ROOT, "_compiled")
     os.makedirs(compile_dir, exist_ok=True)
 
