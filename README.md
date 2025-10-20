@@ -1,4 +1,4 @@
-# iSincNet
+# iSincNet (Lightweight Sincnet Spectrogram Vocoder)
 
 [[Blog]](https://gitlab.com/sonustech/sincnet) [[SincNet Paper]](https://arxiv.org/abs/1808.00158)
 

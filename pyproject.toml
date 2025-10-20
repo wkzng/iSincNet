@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "iSincNet"
 version = "0.4.0"
 authors = [{ name = "Williams Zanga", email = "Williams.zanga@gmail.com" }]
-description = "Fast Lightweight inverstible SincNet"
+description = "Fast Lightweight invertible SincNet"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -15,4 +15,4 @@ license = { text = "MIT" }
 packages = ["sincnet"]
 
 [project.urls]
-"Homepage" = "https://gitlab.com/sonustech/sincnet.git"
+"Homepage" = "https://github.com/wkzng/iSincNet"
