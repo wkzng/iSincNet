@@ -126,13 +126,13 @@ class Trainer(BaseTrainer):
 
 
 if __name__ =="__main__":
-    from datasets.configs import GTZANConfig
+    from datasets.configs import BaseDatasetConfig
     from datasets.dataset import ChunkDataset
     from sincnet.model import SincNet
 
-    model = SincNet()
-    dataset_config = GTZANConfig(id="gtzan")
-    learning_rate = 1e-3
+    model = SincNet(scale="mel")
+    dataset_config = BaseDatasetConfig(id="gtzan")
+    learning_rate = 1e-4
     train_config = TrainConfig(**{
         "batch_size": 8,
         "n_epoch": 500,
@@ -157,4 +157,10 @@ if __name__ =="__main__":
         val_set=datasets["test"],
         config=train_config
     )
+
+    try:
+        model.load_pretrained_weights(weights_folder="pretrained", freeze=False)
+    except:
+        pass
+
     trainer.train()

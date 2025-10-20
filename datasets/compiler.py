@@ -167,13 +167,13 @@ class Compiler:
 
 
 if __name__ == "__main__":
+    ROOT = os.getenv("ROOT_DIRECTORY")
     SAMPLE_RATE = int(os.getenv("SAMPLE_RATE"))
     CHUNK_DURATION = int(os.getenv("CHUNK_DURATION"))
     HOP_LENGTH = int(os.getenv("HOP_LENGTH"))
     N_SAMPLES = int(SAMPLE_RATE * CHUNK_DURATION)
+    TARGET_LUFFS = -float(os.getenv("TARGET_LUFFS", 23))
     N_CHANNELS = 1
-    TARGET_LUFFS = -23
-    ROOT = os.getenv("ROOT_DIRECTORY")
 
     buffer_schemas = {
         "audio": (N_CHANNELS, N_SAMPLES), 
@@ -181,9 +181,6 @@ if __name__ == "__main__":
 
     datasets_folders = [
         'gtzan/train',
-        'mvsep_multisong_dataset/train',
-        'mvsep_synth_dataset/train',
-        'djmax_respectv_22050/train',
     ]
 
     datasets_config = [
@@ -198,7 +195,7 @@ if __name__ == "__main__":
         for folder in datasets_folders
     ]
 
-    compile_name = "mixture"
+    compile_name = "gtzan"
     compile_dir = os.path.join(ROOT, "_compiled")
     os.makedirs(compile_dir, exist_ok=True)
 

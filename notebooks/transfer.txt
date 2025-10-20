@@ -1,5 +1,0 @@
-# sinc : SincNet = SincNet(component="real")
-# ckpt = torch.load("pretrained/x16000fs_128fps_128bins_real_causal.ckpt")
-# state_dict = ckpt["state_dict"]
-# state_dict["encoder.filters"] = sinc.encoder.filters
-# ckpt = torch.save(ckpt, "pretrained/16000fs_128fps_128bins_real_causal.ckpt")
