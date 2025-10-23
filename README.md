@@ -1,6 +1,6 @@
 # iSincNet (Lightweight Sincnet Spectrogram Vocoder)
 
-[[Blog]](https://github.com/wkzng/iSincNet) [[SincNet Paper]](https://arxiv.org/abs/1808.00158)
+[[Blog]](https://github.com/wkzng/iSincNet) [[Original SincNet Paper (M. Ravenelli, Y. Bengio)]](https://arxiv.org/abs/1808.00158)
 
 iSincNet is as Fast and Lightweight Sincnet Spectrogram Vocoder neural network trained to reconstruct audio waveforms from their SincNet spectogram (real and signed 2d representation). We used the GTZAN dataset which is the most-used public dataset for evaluation in machine listening research for music genre recognition (MGR). The files were collected in 2000-2001 from a variety of sources including personal CDs, radio, microphone recordings, in order to represent a variety of recording conditions (http://marsyas.info/downloads/datasets.html).
 
@@ -8,12 +8,15 @@ iSincNet is as Fast and Lightweight Sincnet Spectrogram Vocoder neural network t
   <img src=illustrations/SincNet-Filterbank.png alt="Fast and Lightweight Sincnet Spectrogram Vocoder" width="80%"/>
 </p>
 
-### 2D spectrogram example
-The First 5s second of the Audio ``audio/invertibility/15033000.mp3``
-<!--
-<audio controls src="audio/invertibility/15033000.mp3"></audio><br><audio controls src="audio/invertibility/p232_002.wav"></audio>
--->
-|  | Non-causal  | Causal Encoder |
+Datasets used during development:
+- [GTZAN](https://github.com/chittalpatel/Music-Genre-Classification-GTZAN)
+- [MUSDB-18](https://sigsep.github.io/datasets/musdb.html)
+
+
+## Exanple Spectrogram 
+The First 5s second of the Audio `audio/invertibility/15033000.mp3`
+
+|  | Non-causal Encoder | Causal Encoder |
 |:------:|:-------------------:|:--------------:|
 | signed values | <img src="illustrations/spec_noncausal_signed.jpeg" alt="non-causal 15033000" width="260"> | <img src="illustrations/spec_causal_signed.jpeg" alt="causal 15033000" width="260"> |
 | abs values | <img src="illustrations/spec_noncausal_abs.jpeg" alt="non-causal 15033000" width="260"> | <img src="illustrations/spec_causal_abs.jpeg" alt="causal 15033000" width="260"> |
@@ -21,7 +24,7 @@ The First 5s second of the Audio ``audio/invertibility/15033000.mp3``
 
 ## Available models
 The following table summarizes the key characteristics and access points for the available pretrained models.
-| Sample rate | FPS | # Bins |                              Weights                             | Corpus | Causal Encoder | Open-Source |
+| Sample rate | Frame rate | Bins |                              Weights                             | Corpus | Causal Encoder | Open-Source |
 | :---------: | :-: | :----: | :--------------------------------------------------------------: | :----: | :------------: | :---------: |
 |    16 kHz   | 128 |   128  | [📦](pretrained/16000fs_128fps_128bins_lin_complex_ncausal.ckpt) |  GTZAN |        ×       |      √      |
 |    16 kHz   | 128 |   128  |   [📦](pretrained/16000fs_128fps_128bins_lin_real_causal.ckpt)   |  GTZAN |        √       |      √      |
@@ -34,20 +37,11 @@ The following table summarizes the key characteristics and access points for the
 |   44.1 kHz  | 350 |   256  |   [📦](pretrained/44100fs_350fps_256bins_mel_real_causal.ckpt)   |  GTZAN |        √       |      √      |
 
 
-# TODO: Benchmark
-colums: architecture or method | dataset | MSE | MAE | SNR | checkpoint
-
-datasets:
-- [GTZAN](https://github.com/chittalpatel/Music-Genre-Classification-GTZAN)
-- [MUSDB-18](https://sigsep.github.io/datasets/musdb.html)
-
-
 ## Quick Start 
 ```bash
 pip install -r requirements.txt
 ```
 Please refer to the [demo notebook](demo.ipynb) which shows how to load and use the model
-
 
 
 ```python
@@ -57,13 +51,27 @@ import torch
 from sincnet.model import SincNet, Quantizer
 from datasets.utils.waveform import WaveformLoader 
 
-# load the model
+
+SAMPLE_RATE = 16_000
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = SincNet().load_pretrained_weights().eval().to(device)
-processor = WaveformLoader(sample_rate=SAMPLE_RATE) 
+audio_loader = WaveformLoader(sample_rate=SAMPLE_RATE) 
+
+# load the model
+params = {
+    "fs": SAMPLE_RATE,
+    "fps": 128,
+    "scale": "lin",
+    "component": "complex"
+}
+
+model : SincNet = (
+    SincNet(**params)
+    .load_pretrained_weights(weights_folder="pretrained", verbose=False)
+    .eval()
+    .to(device)
+)
 
 # encode and decode an audio waveform
-sample_rate = 16_000
 duration = 5
 offset = 0
 audio_path = ... 
@@ -76,11 +84,11 @@ with torch.no_grad():
   spectrogram = model.encode(audio_tensor.unsqueeze(0), scale="mel")
   reconstructed_audio_tensor = model.decode(spectrogram, scale="mel")
 
-#(optional) elementwise quantization into a vocabulary of size 2^{q_bits}
+#(optional) elementwise quantization into a discrete vocabulary of size 2^{q_bits}
 quantizer = Quantizer(q_bits=10).to(device)
 indices = quantizer(spectrogram)
-detokenized_spectrogram = tokenizer.inverse(indices)
-detokenized_audio = model.decode(detokenized_spectrogram)
+dequantized_spectrogram = tokenizer.inverse(indices)
+dequantized_audio = model.decode(dequantized_spectrogram)
 ```
 
 
@@ -112,9 +120,7 @@ Related discussion about SincNet vs STFT https://github.com/mravanelli/SincNet/i
 
 
 ## Roadmap and projects status
-- [x] Added Automatic projection forward and backward to MEL scale
+- [x] Host weights in Github and add auto-download
 - [ ] Benchmark of inversion vs Griffin-Lim, iSTFTNet
-- [ ] Host weights in cloud and add auto-download
 
-## Contributions and acknowledgment
-Show your appreciation to those who have contributed to the project.
+## Contributions and acknowledgment (TODO)
