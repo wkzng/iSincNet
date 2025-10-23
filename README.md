@@ -1,12 +1,40 @@
 # iSincNet (Lightweight Sincnet Spectrogram Vocoder)
 
-[[Blog]](https://gitlab.com/sonustech/sincnet) [[SincNet Paper]](https://arxiv.org/abs/1808.00158)
+[[Blog]](https://github.com/wkzng/iSincNet) [[SincNet Paper]](https://arxiv.org/abs/1808.00158)
 
 iSincNet is as Fast and Lightweight Sincnet Spectrogram Vocoder neural network trained to reconstruct audio waveforms from their SincNet spectogram (real and signed 2d representation). We used the GTZAN dataset which is the most-used public dataset for evaluation in machine listening research for music genre recognition (MGR). The files were collected in 2000-2001 from a variety of sources including personal CDs, radio, microphone recordings, in order to represent a variety of recording conditions (http://marsyas.info/downloads/datasets.html).
 
 <p align="center">
   <img src=illustrations/SincNet-Filterbank.png alt="Fast and Lightweight Sincnet Spectrogram Vocoder" width="80%"/>
 </p>
+
+### Invertibility samples
+
+| Sample | Non-causal (image) | Causal (image) |
+|:------:|:-------------------:|:--------------:|
+| <audio controls src="audio/invertibility/15033000.mp3"></audio><br><audio controls src="audio/invertibility/p232_002.wav"></audio> | <img src="images/invertibility/noncausal_15033000.png" alt="non-causal 15033000" width="260"> | <img src="images/invertibility/causal_15033000.png" alt="causal 15033000" width="260"> |
+
+<!-- Optional second row if you have separate images for p232_002 -->
+<!--
+| <audio controls src="audio/invertibility/p232_002.wav"></audio> | <img src="images/invertibility/noncausal_p232_002.png" alt="non-causal p232_002" width="260"> | <img src="images/invertibility/causal_p232_002.png" alt="causal p232_002" width="260"> |
+-->
+> Tip: Keep the audio & image paths **relative** (as above) so they work when viewing the repo on GitHub.
+
+
+## Available models
+The following table summarizes the key characteristics and access points for the available pretrained models.
+| Sample rate | FPS | # Bins |                              Weights                             | Corpus | Causal Encoder | Open-Source |
+| :---------: | :-: | :----: | :--------------------------------------------------------------: | :----: | :------------: | :---------: |
+|    16 kHz   | 128 |   128  | [📦](pretrained/16000fs_128fps_128bins_lin_complex_ncausal.ckpt) |  GTZAN |        ×       |      √      |
+|    16 kHz   | 128 |   128  |   [📦](pretrained/16000fs_128fps_128bins_lin_real_causal.ckpt)   |  GTZAN |        √       |      √      |
+|    16 kHz   | 128 |   256  | [📦](pretrained/16000fs_128fps_256bins_mel_complex_ncausal.ckpt) |  GTZAN |        ×       |      √      |
+|   44.1 kHz  | 210 |   256  | [📦](pretrained/44100fs_210fps_256bins_lin_complex_ncausal.ckpt) |  GTZAN |        ×       |      √      |
+|   44.1 kHz  | 210 |   512  | [📦](pretrained/44100fs_210fps_512bins_mel_complex_ncausal.ckpt) |  GTZAN |        ×       |      √      |
+|   44.1 kHz  | 350 |   128  |   [📦](pretrained/44100fs_350fps_128bins_lin_real_causal.ckpt)   |  GTZAN |        √       |      √      |
+|   44.1 kHz  | 350 |   128  | [📦](pretrained/44100fs_350fps_128bins_lin_complex_ncausal.ckpt) |  GTZAN |        ×       |      √      |
+|   44.1 kHz  | 350 |   256  | [📦](pretrained/44100fs_350fps_256bins_mel_complex_ncausal.ckpt) |  GTZAN |        ×       |      √      |
+|   44.1 kHz  | 350 |   256  |   [📦](pretrained/44100fs_350fps_256bins_mel_real_causal.ckpt)   |  GTZAN |        √       |      √      |
+
 
 # TODO: Benchmark
 colums: architecture or method | dataset | MSE | MAE | SNR | checkpoint
@@ -21,6 +49,7 @@ datasets:
 pip install -r requirements.txt
 ```
 Please refer to the [demo notebook](demo.ipynb) which shows how to load and use the model
+
 
 
 ```python
