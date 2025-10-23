@@ -174,6 +174,11 @@ class BaseTrainer:
         torch.save({**stats, **state}, ckpt_path)
 
 
+    def evaluate(self, current_epoch:int):
+        """evaluate the model on the train dataset"""
+        pass
+
+
     def train_one_epoch(self, current_epoch:int):
         """evaluate the model on the train dataset"""
         pass

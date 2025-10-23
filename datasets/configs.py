@@ -11,11 +11,12 @@ project_root = os.path.dirname(current_script_dir)
 
 class BaseDatasetConfig:
     id :str
-    sample_rate:int = int(os.getenv("SAMPLE_RATE"))
+    sample_rate:int 
     audio_root: str = os.getenv("H5_DIRECTORY")
 
-    def __init__(self, id:str) -> None:
+    def __init__(self, id:str, sample_rate:int=None) -> None:
         super().__init__()
+        self.sample_rate = sample_rate or int(os.getenv("SAMPLE_RATE", 16000))
         self.id = id
 
     @property
@@ -31,5 +32,5 @@ class BaseDatasetConfig:
 
 class GTZANConfig(BaseDatasetConfig):
     """ traceability: https://www.kaggle.com/datasets/andradaolteanu/gtzan-dataset-music-genre-classification """
-    def __init__(self, id:str="gtzan") -> None:
-        super().__init__(id=id)
+    def __init__(self, sample_rate:int=None) -> None:
+        super().__init__(id="gtzan", sample_rate=sample_rate)

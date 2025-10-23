@@ -4,11 +4,65 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
-from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import Dataset
 
 
-from training.trainer import BaseTrainer, TrainConfig, STFT
+from training.trainer import BaseTrainer, TrainConfig
+
+
+
+def calculate_si_sdr(references: torch.Tensor, estimates: torch.Tensor) -> torch.Tensor:
+    """
+    Computes the Scale-Invariant Signal-to-Distortion Ratio (SI-SDR).
+
+    Args:
+        references (torch.Tensor): The ground truth waveforms (B, T).
+        estimates (torch.Tensor): The reconstructed waveforms (B, T).
+
+    Returns:
+        torch.Tensor: The mean SI-SDR score across the batch (scalar, in dB).
+    """
+    # Ensure inputs are 2D (B, T) - remove the channel dimension if present
+    if references.ndim == 3:
+        references = references.squeeze(1)
+    if estimates.ndim == 3:
+        estimates = estimates.squeeze(1)
+
+    # 1. Zero-mean the signals
+    references = references - torch.mean(references, dim=-1, keepdim=True)
+    estimates = estimates - torch.mean(estimates, dim=-1, keepdim=True)
+
+    # 2. Find the optimal scaling factor (alpha) for the projection
+    # alpha = <estimates, references> / ||references||^2
+    # s_target = alpha * references
+    
+    # Calculate projection of estimates onto references
+    s_target_num = torch.sum(estimates * references, dim=-1, keepdim=True)
+    s_target_den = torch.sum(references ** 2, dim=-1, keepdim=True)
+    
+    # Handle the unlikely case of silent reference to avoid division by zero
+    s_target_den = torch.where(s_target_den == 0, torch.full_like(s_target_den, 1e-8), s_target_den)
+    
+    alpha = s_target_num / s_target_den
+    s_target = alpha * references
+    
+    # 3. Calculate the noise (e_noise)
+    # e_noise = estimates - s_target
+    e_noise = estimates - s_target
+
+    # 4. Calculate SDR (in linear scale)
+    # SDR = ||s_target||^2 / ||e_noise||^2
+    s_target_power = torch.sum(s_target ** 2, dim=-1)
+    e_noise_power = torch.sum(e_noise ** 2, dim=-1)
+
+    # Handle the unlikely case of zero noise power
+    e_noise_power = torch.where(e_noise_power == 0, torch.full_like(e_noise_power, 1e-8), e_noise_power)
+
+    # 5. Convert to Decibels and return the mean
+    si_sdr = 10 * torch.log10(s_target_power / e_noise_power)
+    
+    # SI-SDR should be returned as a scalar average over the batch
+    return torch.mean(si_sdr)
 
 
 
@@ -31,12 +85,60 @@ class Trainer(BaseTrainer):
         return torch.mean(x**2, dim=dim, keepdim=keepdim)
 
 
+    @torch.no_grad()
+    def evaluate(self, current_epoch:int) -> dict[str, float]:
+        """evaluate the model on the train dataset"""
+        self.model.eval()
+        n_batches = len(self.val_loader)
+        if n_batches == 0:
+            return {}
+        
+        progress_bar = tqdm(enumerate(self.val_loader), ncols=200, total=n_batches, disable=False, leave=False)
+        scores = {
+            "L1": 0.0, 
+            "L2": 0.0, 
+            "stft": 0.0,
+            "si_sdr": 0.0,
+        }
+
+        for b_idx, batch in progress_bar:
+            waveforms = batch["waveform"].to(self.device).squeeze(1)
+            reconstructed_wav = self.model(waveforms)
+            
+            scores["L1"] += F.l1_loss(waveforms, reconstructed_wav)
+            scores["L2"] += F.mse_loss(waveforms, reconstructed_wav)
+            scores["si_sdr"] += calculate_si_sdr(waveforms, reconstructed_wav)
+
+            stft_targ = self.stft.compute_log1p_magnitude(waveforms)
+            stft_pred = self.stft.compute_log1p_magnitude(reconstructed_wav)
+            scores["stft"] += F.l1_loss(stft_targ, stft_pred)
+            n_batches += 1
+            if b_idx == 10:
+                break
+
+        scores = {k: v / n_batches for k, v in scores.items()}
+        scores["log-L1"] = torch.log(scores.pop("L1"))
+        scores["log-L2"] = torch.log(scores.pop("L2"))
+        scores["log-stft"] = torch.log(scores.pop("stft"))
+
+        #tensorboard logs
+        for k, v in scores.items():
+            self.writer.add_scalar(f"Eval:{k}", v, self.n_steps)
+
+        #training metrics log for stdout
+        message = f"Eval | {current_epoch}/{self.config.n_epoch}"
+        for k, v in scores.items():
+            message += " | {}={:0.6}".format(k, float(v))
+        print(message)
+        return scores
+
+
     def train_one_epoch(self, current_epoch:int):
         """evaluate the model on the train dataset"""
         self.model.train()
         n_batches = len(self.train_loader)
         lr = self.scheduler.get_lr()[0]
-        progress_bar = tqdm(enumerate(self.train_loader), ncols=200, total=n_batches, disable=False)
+        progress_bar = tqdm(enumerate(self.train_loader), ncols=200, total=n_batches, disable=False, leave=False)
 
         for b_idx, batch in progress_bar:
             #transforms = self.audio_augmenter.get_random_transforms(k=3)
@@ -115,9 +217,11 @@ class Trainer(BaseTrainer):
         checkpoint = self.load_checkpoint()
         start_epoch = checkpoint.get("epoch", 0)
         self.n_steps = checkpoint.get("n_steps", 0)
+        self.evaluate(start_epoch)
 
         for current_epoch in range(start_epoch, self.config.n_epoch):
             self.train_one_epoch(current_epoch)
+            self.evaluate(current_epoch)
             self.save_checkpoint(stats={}, current_epoch=current_epoch, n_steps=self.n_steps)
             self.scheduler.step()
         self.writer.close()
@@ -130,15 +234,17 @@ if __name__ =="__main__":
     from datasets.dataset import ChunkDataset
     from sincnet.model import SincNet
 
-    model = SincNet(scale="mel")
-    dataset_config = BaseDatasetConfig(id="gtzan")
-    learning_rate = 1e-4
+    model = SincNet(scale="mel", fs=16000, fps=128, component="complex")
+    dataset_config = BaseDatasetConfig(id="gtzan", sample_rate=model.config.fs)
+
+    learning_rate = 1e-3
     train_config = TrainConfig(**{
         "batch_size": 8,
         "n_epoch": 500,
         "learning_rate": learning_rate,
         "weight_decay": learning_rate / 10,
-        "training_id": dataset_config.id
+        "training_id": dataset_config.id,
+        "sample_rate": dataset_config.sample_rate
     })
 
 

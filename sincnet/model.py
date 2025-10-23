@@ -9,21 +9,6 @@ from dataclasses import dataclass, asdict
 
 
 
-def next_power_of_2(x: int) -> int:
-    """ Calculates the smallest power of 2 that is greater than or equal to x.
-        Example:
-            >>> next_power_of_2(100): 128
-            >>> next_power_of_2(64): 64
-    """
-    if x < 0:
-        raise ValueError("Input must be a non-negative integer.")
-    if x == 0:
-        return 1
-    # For a number x, the next power of 2 is 2 raised to the number of bits
-    # in the binary representation of x-1.
-    return 1 << (x - 1).bit_length()
-
-
 
 @dataclass
 class ModelArgs:
@@ -38,16 +23,15 @@ class ModelArgs:
                 coverage * overlap * fs = 2 * FPS * (n_bins - 1)
 
         Practically: we want to control the FPS reasonably well so we need FPS to be a divisor of fs
-            fs = 22050 = 2 * (3*5*7)^2  so interesting candidates for FPS are {45 49 50 63 70 75 90 98 105 126 147 150}
-            fs = 16000 = 4^2 * (2*5)^3  so interesting candidates for FPS are {40, 50, 64, 80, 100, 125, 128, 160}
-    """
+            fs = 16000 = 2^7 * 5^3          so interesting candidates for FPS are {40, 50, 64, 80, 100, 125, 128, 160}
+            fs = 22050 = 2^1 * (3*5*7)^2    so interesting candidates for FPS are {45 49 50 63 70 75 90 98 105 126 147 150}
+            fs = 44100 = (2*3*5*7)^2        so interesting candidates for FPS are same as for 22050 and their doubles
+        """
     component: str 
     causal: bool
     scale: str
     fps: int
-    fs:int = 16000
-    q_bits : int = 8
-    neighborhood_radius : int = 2
+    fs: int
 
     @property
     def args(self) -> dict:
@@ -55,11 +39,10 @@ class ModelArgs:
 
     @property
     def n_bins(self) -> int:
-        return next_power_of_2(self.fs // self.fps)
-
-    @property
-    def n_fft(self) -> int:
-        return 2 * (self.n_bins - 1)
+        ideal = self.fs // self.fps
+        next_power_of_two = 1 << (ideal - 1).bit_length()
+        next_power_of_two *= 1 if self.scale =="lin" else 2
+        return next_power_of_two
     
     @property
     def hop_length(self) -> int:
@@ -73,12 +56,6 @@ class ModelArgs:
     def model_id(self) -> str:
         causal = "causal" if self.causal else "ncausal"
         return f"{self.fs}fs_{self.fps}fps_{self.n_bins}bins_{self.scale}_{self.component}_{causal}"
-    
-    @property
-    def neighborhood(self) -> list[int]:
-        radius = self.neighborhood_radius
-        return range(-radius//2, radius//2 + 1)
-
 
 
 def compute_forward_mu_law_companding(x:torch.Tensor, q_bits:int) -> torch.Tensor:
@@ -253,14 +230,12 @@ class Decoder1d(nn.Module):
     def __init__(self, config:ModelArgs):
         super().__init__()
         self.config = config
-        self.shifts = config.neighborhood
-        self.size = len(self.shifts)
         self.factor = 2 if config.component == "complex" else 1
         self.conv1d = nn.Conv1d(
             self.factor * config.n_bins, 
             config.hop_length, 
-            kernel_size=self.size,
-            padding=self.size//2, 
+            kernel_size=3,
+            padding=1, 
             bias=False
         )
         self.conv1d.weight.data = torch.ones_like(self.conv1d.weight.data)
@@ -293,9 +268,19 @@ class Quantizer(nn.Module):
 
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
-    def __init__(self, component:str="real", causal:bool=True, scale:str="lin", fps:int=128):
+    def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real"):
+        """ STFT-like transform using the SincNet framework with added flexibility
+            fs: int : sample rate of the input signal
+            fps: int: number of frequency bins in the final 2D spectrogram
+            scale: str : mel/lin determine the freauency spacing
+            component:str : real/complex with real producing a the cos transform while complex produce the cos ans sin transforms
+        """
         super().__init__()
-        self.config = ModelArgs(component=component, scale=scale, causal=causal, fps=fps)
+        assert component in ("real", "complex")
+        #NOTE: real component is only compatible with causal kernels
+        causal:bool = True if component == "real" else False
+
+        self.config = ModelArgs(component=component, scale=scale, causal=causal, fps=fps, fs=fs)
         self.complex_output = self.config.component == "complex"
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config, scale=scale)
@@ -367,12 +352,12 @@ if __name__ == '__main__':
     print("Loading audio file....")
     audio_file_path = "audio/invertibility/15033000.mp3"
 
-    sr = 16000
+    sr = 44100
     x, sr = librosa.load(audio_file_path, sr=sr, offset=0, duration=1)
     x = torch.tensor(x).unsqueeze(0)
     print("Audio file tensor shape", x.shape)
 
-    sinc = SincNet()
+    sinc = SincNet(fs=sr, fps=420)
 
     scalogram = sinc.encode(x.unsqueeze(0))
     print(sinc.decode(scalogram).shape)
