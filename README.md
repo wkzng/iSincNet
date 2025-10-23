@@ -13,7 +13,7 @@ Datasets used during development:
 - [MUSDB-18](https://sigsep.github.io/datasets/musdb.html)
 
 
-## Exanple Spectrogram 
+## Example Spectrogram 
 The First 5s second of the Audio `audio/invertibility/15033000.mp3`
 
 |  | Non-causal Encoder | Causal Encoder |
@@ -22,8 +22,10 @@ The First 5s second of the Audio `audio/invertibility/15033000.mp3`
 | abs values | <img src="illustrations/spec_noncausal_abs.jpeg" alt="non-causal 15033000" width="260"> | <img src="illustrations/spec_causal_abs.jpeg" alt="causal 15033000" width="260"> |
 
 
-## Available models
+### 🎧 Pretrained Models
 The following table summarizes the key characteristics and access points for the available pretrained models.
+All models are open-source and stored in the `pretrained/` folder.
+
 | Sample rate | Frame rate | Bins |                              Weights                             | Corpus | Causal Encoder | Open-Source |
 | :---------: | :-: | :----: | :--------------------------------------------------------------: | :----: | :------------: | :---------: |
 |    16 kHz   | 128 |   128  | [📦](pretrained/16000fs_128fps_128bins_lin_complex_ncausal.ckpt) |  GTZAN |        ×       |      √      |
@@ -35,6 +37,19 @@ The following table summarizes the key characteristics and access points for the
 |   44.1 kHz  | 350 |   128  | [📦](pretrained/44100fs_350fps_128bins_lin_complex_ncausal.ckpt) |  GTZAN |        ×       |      √      |
 |   44.1 kHz  | 350 |   256  | [📦](pretrained/44100fs_350fps_256bins_mel_complex_ncausal.ckpt) |  GTZAN |        ×       |      √      |
 |   44.1 kHz  | 350 |   256  |   [📦](pretrained/44100fs_350fps_256bins_mel_real_causal.ckpt)   |  GTZAN |        √       |      √      |
+
+| Sample Rate | Frame rate | Bins | Weights | Corpus | Causal Encoder | Scale | Open-Source |
+|:------------:|:---:|:-----:|:--------|:--------|:----------------:|:-------:|:------------:|
+| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_lin_complex_ncausal.ckpt) | GTZAN | ✗ | Linear | √ |
+| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_lin_real_causal.ckpt) | GTZAN | √ | Linear | √ |
+| 16000 | 128 | 256 | [📦](pretrained/16000fs_128fps_256bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | √ |
+| 44100 | 210 | 256 | [📦](pretrained/44100fs_210fps_256bins_lin_complex_ncausal.ckpt) | GTZAN | ✗ | Linear | √ |
+| 44100 | 210 | 512 | [📦](pretrained/44100fs_210fps_512bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | √ |
+| 44100 | 350 | 128 | [📦](pretrained/44100fs_350fps_128bins_lin_real_causal.ckpt) | GTZAN | √ | Linear | √ |
+| 44100 | 350 | 128 | [📦](pretrained/44100fs_350fps_128bins_lin_complex_ncausal.ckpt) | GTZAN | ✗ | Linear | √ |
+| 44100 | 350 | 256 | [📦](pretrained/44100fs_350fps_256bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | √ |
+| 44100 | 350 | 256 |[📦](pretrained/44100fs_350fps_256bins_mel_real_causal.ckpt) | GTZAN | √ | Mel | √ |
+
 
 
 ## Quick Start 
