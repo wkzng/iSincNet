@@ -26,18 +26,6 @@ The First 5s second of the Audio `audio/invertibility/15033000.mp3`
 The following table summarizes the key characteristics and access points for the available pretrained models.
 All models are open-source and stored in the `pretrained/` folder.
 
-| Sample rate | Frame rate | Bins |                              Weights                             | Corpus | Causal Encoder | Open-Source |
-| :---------: | :-: | :----: | :--------------------------------------------------------------: | :----: | :------------: | :---------: |
-|    16 kHz   | 128 |   128  | [📦](pretrained/16000fs_128fps_128bins_lin_complex_ncausal.ckpt) |  GTZAN |        ×       |      √      |
-|    16 kHz   | 128 |   128  |   [📦](pretrained/16000fs_128fps_128bins_lin_real_causal.ckpt)   |  GTZAN |        √       |      √      |
-|    16 kHz   | 128 |   256  | [📦](pretrained/16000fs_128fps_256bins_mel_complex_ncausal.ckpt) |  GTZAN |        ×       |      √      |
-|   44.1 kHz  | 210 |   256  | [📦](pretrained/44100fs_210fps_256bins_lin_complex_ncausal.ckpt) |  GTZAN |        ×       |      √      |
-|   44.1 kHz  | 210 |   512  | [📦](pretrained/44100fs_210fps_512bins_mel_complex_ncausal.ckpt) |  GTZAN |        ×       |      √      |
-|   44.1 kHz  | 350 |   128  |   [📦](pretrained/44100fs_350fps_128bins_lin_real_causal.ckpt)   |  GTZAN |        √       |      √      |
-|   44.1 kHz  | 350 |   128  | [📦](pretrained/44100fs_350fps_128bins_lin_complex_ncausal.ckpt) |  GTZAN |        ×       |      √      |
-|   44.1 kHz  | 350 |   256  | [📦](pretrained/44100fs_350fps_256bins_mel_complex_ncausal.ckpt) |  GTZAN |        ×       |      √      |
-|   44.1 kHz  | 350 |   256  |   [📦](pretrained/44100fs_350fps_256bins_mel_real_causal.ckpt)   |  GTZAN |        √       |      √      |
-
 | Sample Rate | Frame rate | Bins | Weights | Corpus | Causal Encoder | Scale | Open-Source |
 |:------------:|:---:|:-----:|:--------|:--------|:----------------:|:-------:|:------------:|
 | 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_lin_complex_ncausal.ckpt) | GTZAN | ✗ | Linear | √ |
