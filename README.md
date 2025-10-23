@@ -13,10 +13,10 @@ The First 5s second of the Audio ``audio/invertibility/15033000.mp3``
 <!--
 <audio controls src="audio/invertibility/15033000.mp3"></audio><br><audio controls src="audio/invertibility/p232_002.wav"></audio>
 -->
-|  | Non-causal (image) | Causal (image) |
+|  | Non-causal  | Causal Encoder |
 |:------:|:-------------------:|:--------------:|
-| signed values | <img src="illustrations/SincNet-Filterbank.png" alt="non-causal 15033000" width="260"> | <img src="illustrations/PFnet.png" alt="causal 15033000" width="260"> |
-| abs values | <img src="illustrations/SincNet-Filterbank.png" alt="non-causal 15033000" width="260"> | <img src="illustrations/PFnet.png" alt="causal 15033000" width="260"> |
+| signed values | <img src="illustrations/spec_noncausal_signed.jpeg" alt="non-causal 15033000" width="260"> | <img src="illustrations/spec_causal_signed.jpeg" alt="causal 15033000" width="260"> |
+| abs values | <img src="illustrations/spec_noncausal_abs.jpeg" alt="non-causal 15033000" width="260"> | <img src="illustrations/spec_causal_abs.jpeg" alt="causal 15033000" width="260"> |
 
 
 ## Available models
