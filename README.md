@@ -8,17 +8,15 @@ iSincNet is as Fast and Lightweight Sincnet Spectrogram Vocoder neural network t
   <img src=illustrations/SincNet-Filterbank.png alt="Fast and Lightweight Sincnet Spectrogram Vocoder" width="80%"/>
 </p>
 
-### Invertibility samples
-
-| Sample | Non-causal (image) | Causal (image) |
-|:------:|:-------------------:|:--------------:|
-| <audio controls src="audio/invertibility/15033000.mp3"></audio><br><audio controls src="audio/invertibility/p232_002.wav"></audio> | <img src="images/invertibility/noncausal_15033000.png" alt="non-causal 15033000" width="260"> | <img src="images/invertibility/causal_15033000.png" alt="causal 15033000" width="260"> |
-
-<!-- Optional second row if you have separate images for p232_002 -->
+### 2D spectrogram example
+The First 5s second of the Audio ``audio/invertibility/15033000.mp3``
 <!--
-| <audio controls src="audio/invertibility/p232_002.wav"></audio> | <img src="images/invertibility/noncausal_p232_002.png" alt="non-causal p232_002" width="260"> | <img src="images/invertibility/causal_p232_002.png" alt="causal p232_002" width="260"> |
+<audio controls src="audio/invertibility/15033000.mp3"></audio><br><audio controls src="audio/invertibility/p232_002.wav"></audio>
 -->
-> Tip: Keep the audio & image paths **relative** (as above) so they work when viewing the repo on GitHub.
+|  | Non-causal (image) | Causal (image) |
+|:------:|:-------------------:|:--------------:|
+| signed values | <img src="illustrations/SincNet-Filterbank.png" alt="non-causal 15033000" width="260"> | <img src="illustrations/PFnet.png" alt="causal 15033000" width="260"> |
+| abs values | <img src="illustrations/SincNet-Filterbank.png" alt="non-causal 15033000" width="260"> | <img src="illustrations/PFnet.png" alt="causal 15033000" width="260"> |
 
 
 ## Available models
