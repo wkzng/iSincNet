@@ -41,7 +41,6 @@ class ModelArgs:
     def n_bins(self) -> int:
         ideal = self.fs // self.fps
         next_power_of_two = 1 << (ideal - 1).bit_length()
-        next_power_of_two *= 1 if self.scale =="lin" else 2
         return next_power_of_two
     
     @property
