@@ -234,7 +234,7 @@ if __name__ =="__main__":
     from datasets.dataset import ChunkDataset
     from sincnet.model import SincNet
 
-    model = SincNet(scale="mel", fs=16000, fps=128, component="complex")
+    model = SincNet(scale="mel", fs=44100, fps=350, component="complex")
     dataset_config = BaseDatasetConfig(id="gtzan", sample_rate=model.config.fs)
 
     learning_rate = 1e-3
