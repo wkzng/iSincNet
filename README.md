@@ -30,6 +30,7 @@ All models are open-source and stored in the `pretrained/` folder.
 |:------------:|:---:|:-----:|:--------|:--------|:----------------:|:-------:|:------------:|
 | 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_lin_complex_ncausal.ckpt) | GTZAN | ✗ | Linear | √ |
 | 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_lin_real_causal.ckpt) | GTZAN | √ | Linear | √ |
+| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_mel_real_causal.ckpt) | GTZAN | √ | Mel | √ |
 | 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | √ |
 | 44100 | 350 | 128 | [📦](pretrained/44100fs_350fps_128bins_lin_complex_ncausal.ckpt) | GTZAN | ✗ | Linear | √ |
 | 44100 | 350 | 128 | [📦](pretrained/44100fs_350fps_128bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | √ |
