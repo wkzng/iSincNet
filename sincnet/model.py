@@ -205,7 +205,7 @@ class Encoder1d(nn.Module):
 
 
     def forward(self, wav:torch.Tensor) -> torch.Tensor: 
-        """(B,L) or (B,1,L) → (B,F,T) or (B,F,T) complex"""
+        """(B,L) or (B,1,L) → (B,C,F,T) with C=1 for real/imag and C=2 for complex"""
         if len(wav.shape) < 3:
             wav = wav.unsqueeze(1)
         elif wav.size(1) != 1:
@@ -216,11 +216,11 @@ class Encoder1d(nn.Module):
         if self.component == "complex":
             real = F.conv1d(wav, weight=self.filters.real, bias=None, stride=self.stride, padding=0)
             imag = F.conv1d(wav, weight=self.filters.imag, bias=None, stride=self.stride, padding=0)
-            spectrogram = torch.cat([real, imag], dim=1)
+            spectrogram = torch.stack([real, imag], dim=1)
         elif self.component == "real":
-            spectrogram = F.conv1d(wav, weight=self.filters.real, bias=None, stride=self.stride, padding=0)
+            spectrogram = F.conv1d(wav, weight=self.filters.real, bias=None, stride=self.stride, padding=0).unsqueeze(1)
         else:
-            spectrogram = F.conv1d(wav, weight=self.filters.imag, bias=None, stride=self.stride, padding=0)
+            spectrogram = F.conv1d(wav, weight=self.filters.imag, bias=None, stride=self.stride, padding=0).unsqueeze(1)
         return spectrogram
     
 
@@ -239,8 +239,22 @@ class Decoder1d(nn.Module):
         )
         self.conv1d.weight.data = torch.ones_like(self.conv1d.weight.data)
     
+    def auto_resize(self, x:torch.Tensor) -> torch.Tensor:
+        """Automatically pad or cut the frequency-axis to meet the dimensions of the inverter"""
+        #resize frequency axis
+        _, _, n_bins, _ = x.shape
+        target_bins = self.config.n_bins
+        if n_bins > target_bins:
+            x = x[:,:,:target_bins]
+        elif n_bins < target_bins:
+            pad = target_bins - n_bins
+            #pad from (N,C,F,T) to (N,C,F+pad,T)
+            x = F.pad(x, (0,0,0,pad), mode="constant", value=0)
+        return x.flatten(1,2)
+
     def forward(self, x:torch.Tensor, eps:float=1e-5) -> torch.Tensor:
-        """(B,F,T) -> (B, 1, L)"""
+        """(B,C,F,T) -> (B, L)"""
+        x = self.auto_resize(x)
         x = self.conv1d(x).transpose(1,2)
         x = x.flatten(1)
         return x
@@ -304,27 +318,6 @@ class SincNet(nn.Module):
                 p.requires_grad = False
         return self
     
-    def auto_resize(self, x:torch.Tensor) -> torch.Tensor:
-        """Automatically pad or cut the frequency-axis to meet the dimensions of the inverter"""
-        _, n_bins, _ = x.shape
-        target_bins = self.config.n_bins
-        if n_bins > target_bins:
-            x = x[:,:target_bins]
-        elif n_bins < target_bins:
-            pad = target_bins - n_bins
-            x = F.pad(x, (0, 0, 0, pad))
-        return x
-
-    def split_components_or_combine_complex(self, x:torch.Tensor) -> torch.Tensor:
-        """ reshape a spectrogram [real/img] to complex or vise versa"""
-        if self.complex_output:
-            if torch.is_complex(x):
-                x = torch.cat([x.real, x.imag], dim=1)
-            else:
-                real, imag = torch.split(x, self.config.n_bins, dim=1)
-                x = torch.complex(real, imag)
-        return x
-
     def encode(self, x:torch.Tensor) -> torch.Tensor:
         """Compute the sincNet spectrogram"""
         return self.encoder(x)
@@ -363,7 +356,7 @@ if __name__ == '__main__':
     print(scalogram.shape, scalogram.min(), scalogram.max())
 
 
-    plt.imshow(scalogram[0].detach().numpy())
+    plt.imshow(scalogram.flatten(1,2)[0].detach().numpy())
     plt.savefig(f"spectral_representation.png")
 
     summary(sinc, input_data=x)
