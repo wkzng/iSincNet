@@ -276,9 +276,9 @@ if __name__ =="__main__":
         config=train_config
     )
 
-    # try:
-    #     model.load_pretrained_weights(weights_folder="pretrained", freeze=False)
-    # except:
-    #     pass
+    try:
+        model.load_pretrained_weights(weights_folder="pretrained", freeze=False)
+    except:
+        pass
 
     trainer.train()
