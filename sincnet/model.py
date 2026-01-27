@@ -42,7 +42,6 @@ class ModelArgs:
     def n_bins(self) -> int:
         ideal = self.fs // self.fps
         next_power_of_two = 1 << (ideal - 1).bit_length()
-        assert self.bins_multiplier % 2 == 0
         return next_power_of_two * self.bins_multiplier
     
     @property
