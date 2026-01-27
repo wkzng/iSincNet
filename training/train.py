@@ -234,21 +234,31 @@ if __name__ =="__main__":
     from datasets.dataset import ChunkDataset
     from sincnet.model import SincNet
 
-    #model = SincNet(scale="mel", fs=44100, fps=350, component="complex", bins_multiplier=1)
-    model = SincNet(scale="mel", fs=16000, fps=128, component="complex", bins_multiplier=1)
-
-    dataset_config = BaseDatasetConfig(id="gtzan", sample_rate=model.config.fs)
-
     learning_rate = 1e-3
     train_config = TrainConfig(**{
         "batch_size": 8,
         "n_epoch": 500,
+        "sample_rate": 16_000,
+        'training_id': "gtzan",
+        "component": 'complex',
+        'frame_rate': 128,
+        'spectrogram_scale': "mel",
         "learning_rate": learning_rate,
         "weight_decay": learning_rate / 10,
-        "training_id": dataset_config.id,
-        "sample_rate": dataset_config.sample_rate
+        "training_id": "gtzan",
     })
 
+    dataset_config = BaseDatasetConfig(
+        id=train_config.training_id, 
+        sample_rate=train_config.sample_rate
+    )
+
+    model = SincNet(
+        scale=train_config.spectrogram_scale, 
+        fs=train_config.sample_rate,  
+        fps=train_config.frame_rate, 
+        component=train_config.component
+    )
 
     datasets = {
         split:ChunkDataset(
