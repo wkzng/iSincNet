@@ -19,10 +19,13 @@ from training.utils.stft import TorchSTFT
 class TrainConfig:
     n_epoch : int = 50
     training_id : str = "gtzan"
+    component: str = 'complex'
+    spectrogram_scale: str = "mel",
+    frame_rate: int = 128
     batch_size : int = 4
     train_workers : int = 8
     val_workers : int = 2
-    sample_rate : int = 22050
+    sample_rate : int = 16000
     learning_rate : int = 1e-4
     weight_decay : int = 1e-6
     tnse_log_steps_freq : int = 100
