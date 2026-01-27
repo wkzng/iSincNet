@@ -289,6 +289,7 @@ class SincNet(nn.Module):
             fps: int: number of frequency bins in the final 2D spectrogram
             scale: str : mel/lin determine the freauency spacing
             component:str : real/complex with real producing a the cos transform while complex produce the cos ans sin transforms
+            bins_multiplier: int : multiplier that increase or shrink the number of channels so n_bins = multiplier * NextPowerOf2(fs/fps)
         """
         super().__init__()
         assert component in ("real", "complex")
