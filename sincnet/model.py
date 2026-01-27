@@ -26,12 +26,13 @@ class ModelArgs:
             fs = 16000 = 2^7 * 5^3          so interesting candidates for FPS are {40, 50, 64, 80, 100, 125, 128, 160}
             fs = 22050 = 2^1 * (3*5*7)^2    so interesting candidates for FPS are {45 49 50 63 70 75 90 98 105 126 147 150}
             fs = 44100 = (2*3*5*7)^2        so interesting candidates for FPS are same as for 22050 and their doubles
-        """
+    """
     component: str 
     causal: bool
     scale: str
     fps: int
     fs: int
+    bins_multiplier: int
 
     @property
     def args(self) -> dict:
@@ -41,7 +42,8 @@ class ModelArgs:
     def n_bins(self) -> int:
         ideal = self.fs // self.fps
         next_power_of_two = 1 << (ideal - 1).bit_length()
-        return next_power_of_two
+        assert self.bins_multiplier % 2 == 0
+        return next_power_of_two * self.bins_multiplier
     
     @property
     def hop_length(self) -> int:
@@ -281,7 +283,7 @@ class Quantizer(nn.Module):
 
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
-    def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real"):
+    def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", bins_multiplier:int=1):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
             fps: int: number of frequency bins in the final 2D spectrogram
@@ -293,7 +295,7 @@ class SincNet(nn.Module):
         #NOTE: real component is only compatible with causal kernels
         causal:bool = True if component == "real" else False
 
-        self.config = ModelArgs(component=component, scale=scale, causal=causal, fps=fps, fs=fs)
+        self.config = ModelArgs(component=component, scale=scale, causal=causal, fps=fps, fs=fs, bins_multiplier=bins_multiplier)
         self.complex_output = self.config.component == "complex"
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config, scale=scale)
@@ -349,7 +351,7 @@ if __name__ == '__main__':
     x = torch.tensor(x).unsqueeze(0)
     print("Audio file tensor shape", x.shape)
 
-    sinc = SincNet(fs=sr, fps=420)
+    sinc = SincNet(fs=sr, fps=420, component="complex", scale="mel", bins_multiplier=4)
 
     scalogram = sinc.encode(x.unsqueeze(0))
     print(sinc.decode(scalogram).shape)
