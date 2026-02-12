@@ -276,26 +276,28 @@ class Quantizer(nn.Module):
 
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
-    def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128):
+    def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128, q_bits:int=8, causal:bool=True):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
             fps: int: number of frequency bins in the final 2D spectrogram
             scale: str : mel/lin determine the freauency spacing
             component:str : real/complex with real producing a the cos transform while complex produce the cos ans sin transforms
             n_bins: int : number of freauency bins to generate
+            q_bits: int : number of bits used by the spectrogram quantizer
+            causal: bool : enforce or not causality on filters
         """
         super().__init__()
         assert component in ("real", "complex")
         #NOTE: check that the number of bins is a power of 2
         assert n_bins > 0 and (n_bins & (n_bins - 1)) == 0
         #NOTE: real component is only compatible with causal kernels
-        causal:bool = True if component == "real" else False
+        causal:bool = True if component == "real" else causal
 
         self.config = ModelArgs(component=component, scale=scale, causal=causal, fps=fps, fs=fs, n_bins=n_bins)
-        self.complex_output = self.config.component == "complex"
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config, scale=scale)
         self.decoder = Decoder1d(self.config)
+        self.quantizer = Quantizer(q_bits=q_bits)
 
     def load_pretrained_weights(self, weights_folder:str, freeze:bool=True, device:str="cpu", verbose:bool=False) -> None:
         """ Load pretrained weights for sincnet """
@@ -316,12 +318,17 @@ class SincNet(nn.Module):
                 p.requires_grad = False
         return self
     
-    def encode(self, x:torch.Tensor) -> torch.Tensor:
+    def encode(self, x:torch.Tensor, quantize:bool=False) -> torch.Tensor:
         """Compute the sincNet spectrogram"""
-        return self.encoder(x)
+        x = self.encoder(x)
+        if quantize:
+            x = self.quantizer(x)
+        return x
 
-    def decode(self, x:torch.Tensor) -> torch.Tensor:
+    def decode(self, x:torch.Tensor, dequantize:bool=False) -> torch.Tensor:
         """Reconstruct audio from linear sincNet spectrogram"""
+        if dequantize:
+            x = self.quantizer.inverse(x)
         return self.decoder(x)
     
     def forward(self, x:torch.Tensor) -> torch.Tensor:

@@ -20,7 +20,9 @@ class TrainConfig:
     n_epoch : int = 50
     training_id : str = "gtzan"
     component: str = 'complex'
+    causal : bool = True
     spectrogram_scale: str = "mel",
+    model_selection_criterion: str = "log-L1"
     frame_rate: int = 128
     batch_size : int = 4
     train_workers : int = 8
@@ -164,7 +166,7 @@ class BaseTrainer:
         return {}
     
 
-    def save_checkpoint(self, stats:dict, current_epoch:int, n_steps:int):
+    def save_checkpoint(self, stats:dict, current_epoch:int, n_steps:int, name:str=None):
         """save the current training parameters as checkpoint"""
         state = {
             "state_dict":self.model.state_dict(), 
@@ -173,7 +175,8 @@ class BaseTrainer:
             "epoch": current_epoch,
             "n_steps": n_steps
         }
-        ckpt_path = os.path.join(self.checkpoint_dir, f"{self.model.name}.ckpt")
+        name = name if name else self.model.name
+        ckpt_path = os.path.join(self.checkpoint_dir, f"{name}.ckpt")
         torch.save({**stats, **state}, ckpt_path)
 
 

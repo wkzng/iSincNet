@@ -112,10 +112,7 @@ class Trainer(BaseTrainer):
             stft_targ = self.stft.compute_log1p_magnitude(waveforms)
             stft_pred = self.stft.compute_log1p_magnitude(reconstructed_wav)
             scores["stft"] += F.l1_loss(stft_targ, stft_pred)
-            n_batches += 1
-            if b_idx == 10:
-                break
-
+ 
         scores = {k: v / n_batches for k, v in scores.items()}
         scores["log-L1"] = torch.log(scores.pop("L1"))
         scores["log-L2"] = torch.log(scores.pop("L2"))
@@ -205,7 +202,7 @@ class Trainer(BaseTrainer):
             
             #checkpoint snapshot
             if self.n_steps>0 and self.n_steps % 100 == 0:
-               self.save_checkpoint(stats={}, current_epoch=current_epoch, n_steps=self.n_steps)
+               self.save_checkpoint(stats={}, current_epoch=current_epoch, n_steps=self.n_steps, name="latest")
 
             #increment the step tracker
             self.n_steps += 1
@@ -217,12 +214,17 @@ class Trainer(BaseTrainer):
         checkpoint = self.load_checkpoint()
         start_epoch = checkpoint.get("epoch", 0)
         self.n_steps = checkpoint.get("n_steps", 0)
-        self.evaluate(start_epoch)
+
+        criterion = self.config.model_selection_criterion
+        best_stats = self.evaluate(start_epoch)
 
         for current_epoch in range(start_epoch, self.config.n_epoch):
             self.train_one_epoch(current_epoch)
-            self.evaluate(current_epoch)
-            self.save_checkpoint(stats={}, current_epoch=current_epoch, n_steps=self.n_steps)
+            curr_stats = self.evaluate(current_epoch)
+            if best_stats[criterion] > curr_stats[criterion]:
+                print(f"New Best Nodel Fiunt at epoch {current_epoch}")
+                best_stats = curr_stats
+                self.save_checkpoint(stats={}, current_epoch=current_epoch, n_steps=self.n_steps)
             self.scheduler.step()
         self.writer.close()
 
@@ -234,13 +236,15 @@ if __name__ =="__main__":
     from datasets.dataset import ChunkDataset
     from sincnet.model import SincNet
 
-    learning_rate = 1e-3
-    train_config = TrainConfig(**{
+    learning_rate = 1e-4
+    args = TrainConfig(**{
         "batch_size": 8,
         "n_epoch": 500,
         "sample_rate": 16_000,
         'training_id': "gtzan",
         "component": 'complex',
+        "model_selection_criterion": "log-L1",
+        "causal": True,
         'frame_rate': 128,
         'spectrogram_scale': "mel",
         "learning_rate": learning_rate,
@@ -249,15 +253,16 @@ if __name__ =="__main__":
     })
 
     dataset_config = BaseDatasetConfig(
-        id=train_config.training_id, 
-        sample_rate=train_config.sample_rate
+        id=args.training_id, 
+        sample_rate=args.sample_rate
     )
 
     model = SincNet(
-        scale=train_config.spectrogram_scale, 
-        fs=train_config.sample_rate,  
-        fps=train_config.frame_rate, 
-        component=train_config.component
+        scale=args.spectrogram_scale,
+        causal=args.causal,
+        fs=args.sample_rate,  
+        fps=args.frame_rate, 
+        component=args.component
     )
 
     datasets = {
@@ -273,7 +278,7 @@ if __name__ =="__main__":
         model=model, 
         train_set=datasets["train"], 
         val_set=datasets["test"],
-        config=train_config
+        config=args
     )
 
     try:

@@ -181,6 +181,7 @@ if __name__ == "__main__":
 
     datasets_folders = [
         'gtzan/train',
+        'gtzan/test',
     ]
 
     datasets_config = [
