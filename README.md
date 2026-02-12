@@ -51,7 +51,7 @@ Please refer to the [demo notebook](demo.ipynb) which shows how to load and use 
 import numpy as np
 import librosa
 import torch
-from sincnet.model import SincNet, Quantizer
+from sincnet.model import SincNet
 from datasets.utils.waveform import WaveformLoader 
 
 
@@ -63,8 +63,10 @@ audio_loader = WaveformLoader(sample_rate=SAMPLE_RATE)
 params = {
     "fs": SAMPLE_RATE,
     "fps": 128,
-    "scale": "lin",
-    "component": "complex"
+    "scale": "mel",
+    "component": "complex",
+    "causal": True,
+    "q_bits": 8 
 }
 
 model : SincNet = (
@@ -84,14 +86,8 @@ waveform = audio_loader.normalise_loudness(waveform, loudness, target_lufs=-23)
 
 with torch.no_grad():
   audio_tensor = torch.from_numpy(waveform).to(device).float()
-  spectrogram = model.encode(audio_tensor.unsqueeze(0), scale="mel")
-  reconstructed_audio_tensor = model.decode(spectrogram, scale="mel")
-
-#(optional) elementwise quantization into a discrete vocabulary of size 2^{q_bits}
-quantizer = Quantizer(q_bits=10).to(device)
-indices = quantizer(spectrogram)
-dequantized_spectrogram = tokenizer.inverse(indices)
-dequantized_audio = model.decode(dequantized_spectrogram)
+  spectrogram = model.encode(audio_tensor.unsqueeze(0), quantize=True)
+  reconstructed_audio_tensor = model.decode(spectrogram, dequantize=True)
 ```
 
 
