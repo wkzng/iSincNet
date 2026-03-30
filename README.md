@@ -12,7 +12,6 @@ Datasets used during development:
 - [GTZAN](https://github.com/chittalpatel/Music-Genre-Classification-GTZAN)
 - [MUSDB-18](https://sigsep.github.io/datasets/musdb.html)
 
-
 ## Example Spectrogram 
 The First 5s second of the Audio `audio/invertibility/15033000.mp3`
 
@@ -21,22 +20,34 @@ The First 5s second of the Audio `audio/invertibility/15033000.mp3`
 | signed values | <img src="illustrations/spec_noncausal_signed.jpeg" alt="non-causal 15033000" width="260"> | <img src="illustrations/spec_causal_signed.jpeg" alt="causal 15033000" width="260"> |
 | abs values | <img src="illustrations/spec_noncausal_abs.jpeg" alt="non-causal 15033000" width="260"> | <img src="illustrations/spec_causal_abs.jpeg" alt="causal 15033000" width="260"> |
 
+## Effect of applying sincnet envelope 
+
+As discussed in [Section 2.1](https://arxiv.org/pdf/1910.10400), SincNet can be recast as a standard wavelet transform with an envelopped defined by the sinc depending explicitly on the bandwidths as `envelope(x, B) = sinc(B x / 2)`. As a consequen the orignal cos and sine components of the filter are modulated (see example below, where we show causal filters).
+
+| Kernel | index=10 | index=104 |
+|:------:|:-------------------:|:--------------:|
+| Without Sinc Envelope| <img src="illustrations/kernels/nosinc/kernel_10.png" alt="non-causal 15033000" width="260"> | <img src="illustrations/kernels/nosinc/kernel_104.png" alt="causal 15033000" width="260"> |
+| With Sinc Envelope | <img src="illustrations/kernels/sinc/kernel_10.png" alt="non-causal 15033000" width="260"> | <img src="illustrations/kernels/sinc/kernel_104.png" alt="causal 15033000" width="260"> |
+
+At lower freauencies (~low indices), the sinc envelope's effect are negligible unlike higher frequency where it forced the filter to be more localised.
+
 
 ### 🎧 Pretrained Models
 The following table summarizes the key characteristics and access points for the available pretrained models.
 All models are open-source and stored in the `pretrained/` folder.
 
-| Sample Rate | FPS | #Bins | Weights | Corpus | Causal Encoder | Scale | Open-Source |
-|:------------:|:---:|:-----:|:--------|:--------|:----------------:|:-------:|:------------:|
-| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_lin_complex_ncausal.ckpt) | GTZAN | ✗ | Linear | √ |
-| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_lin_real_causal.ckpt) | GTZAN | √ | Linear | √ |
-| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_mel_real_causal.ckpt) | GTZAN | √ | Mel | √ |
-| 16000 | 128 | 256 | [📦](pretrained/16000fs_128fps_256bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | √ |
-| 16000 | 128 | 512 | [📦](pretrained/16000fs_128fps_512bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | √ |
-| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | √ |
-| 44100 | 350 | 128 | [📦](pretrained/44100fs_350fps_128bins_lin_complex_ncausal.ckpt) | GTZAN | ✗ | Linear | √ |
-| 44100 | 350 | 128 | [📦](pretrained/44100fs_350fps_128bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | √ |
-| 44100 | 350 | 256 | [📦](pretrained/44100fs_350fps_256bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | √ |
+| Sample Rate | FPS | #Bins | Weights | Corpus | Causal Encoder | Scale | Sinc Envelope | Open-Source |
+|:------------:|:---:|:-----:|:--------|:--------|:----------------:|:-------:|:-------------:|:------------:|
+| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_lin_complex_ncausal.ckpt) | GTZAN | ✗ | Linear | ✗ | √ |
+| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_lin_real_causal.ckpt) | GTZAN | √ | Linear | ✗ | √ |
+| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_mel_real_causal.ckpt) | GTZAN | √ | Mel | ✗ | √ |
+| 16000 | 128 | 256 | [📦](pretrained/16000fs_128fps_256bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | ✗ | √ |
+| 16000 | 128 | 512 | [📦](pretrained/16000fs_128fps_512bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | ✗ | √ |
+| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | ✗ | √ |
+| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_mel_complex_ncausal_sinc.ckpt) | GTZAN | ✗ | Mel | √ | √ |
+| 44100 | 350 | 128 | [📦](pretrained/44100fs_350fps_128bins_lin_complex_ncausal.ckpt) | GTZAN | ✗ | Linear | ✗ | √ |
+| 44100 | 350 | 128 | [📦](pretrained/44100fs_350fps_128bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | ✗ | √ |
+| 44100 | 350 | 256 | [📦](pretrained/44100fs_350fps_256bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | ✗ | √ |
 
 
 
@@ -121,5 +132,3 @@ Related discussion about SincNet vs STFT https://github.com/mravanelli/SincNet/i
 ## Roadmap and projects status
 - [x] Host weights in Github and add auto-download
 - [ ] Benchmark of inversion vs Griffin-Lim, iSTFTNet
-
-## Contributions and acknowledgment (TODO)

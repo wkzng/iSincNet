@@ -33,6 +33,7 @@ class ModelArgs:
     n_bins: int
     fps: int
     fs: int
+    apply_sinc_envelope: bool = False
 
     @property
     def args(self) -> dict:
@@ -49,7 +50,8 @@ class ModelArgs:
     @property
     def model_id(self) -> str:
         causal = "causal" if self.causal else "ncausal"
-        return f"{self.fs}fs_{self.fps}fps_{self.n_bins}bins_{self.scale}_{self.component}_{causal}"
+        base = f"{self.fs}fs_{self.fps}fps_{self.n_bins}bins_{self.scale}_{self.component}_{causal}"
+        return f"{base}_sinc" if self.apply_sinc_envelope else base
 
 
 def compute_forward_mu_law_companding(x:torch.Tensor, q_bits:int) -> torch.Tensor:
@@ -117,7 +119,7 @@ def mel_freqs(fs:int, n_bins:int) -> np.ndarray:
     return centers, bands
 
 
-def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causal:bool, apply_sinc:bool=False) -> torch.Tensor:
+def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causal:bool, apply_sinc_envelope:bool=False) -> torch.Tensor:
     """ Compute real and imaginary part of sinc kernels
             r(x) = 2a*sinc(ax) - 2b*sinc(bx)  with x=2πt
 
@@ -148,7 +150,7 @@ def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causa
     vibrations = torch.exp(1j * Fx)
 
     envelope = 1
-    if apply_sinc:
+    if apply_sinc_envelope:
         #compte w(x) = 2B * sinc(Bx/2)
         #Note: the implementation torch.sinc = np.sinc corresponds to the normalised sinc defined as sinc(x)=sinc_π(x/π) 
         #Therefore w(x) = 2B * sinc_π(Bx/2π)
@@ -169,7 +171,7 @@ def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causa
 
 
 class Encoder1d(nn.Module):
-    def __init__(self, config:ModelArgs, scale:str):
+    def __init__(self, config:ModelArgs):
         super().__init__()
         self.stride = config.hop_length
         self.padding = config.kernel_size // 2
@@ -178,8 +180,9 @@ class Encoder1d(nn.Module):
             kernel_size=config.kernel_size,
             fs=config.fs,
             n_bins=config.n_bins,
-            scale=scale,
-            causal=config.causal
+            scale=config.scale,
+            causal=config.causal,
+            apply_sinc_envelope=config.apply_sinc_envelope
         )
         filters = self.preprocess_filters(filters)
         self.register_buffer("filters", filters.unsqueeze(1))
@@ -276,7 +279,8 @@ class Quantizer(nn.Module):
 
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
-    def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128, q_bits:int=8, causal:bool=True):
+    def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128, 
+                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
             fps: int: number of frequency bins in the final 2D spectrogram
@@ -285,6 +289,7 @@ class SincNet(nn.Module):
             n_bins: int : number of freauency bins to generate
             q_bits: int : number of bits used by the spectrogram quantizer
             causal: bool : enforce or not causality on filters
+            apply_sinc_envelope: bool : whether to apply the sinc envelope to the kernels or not (see section 2.1 of https://arxiv.org/pdf/1910.10400.pdf for more details)
         """
         super().__init__()
         assert component in ("real", "complex")
@@ -293,9 +298,12 @@ class SincNet(nn.Module):
         #NOTE: real component is only compatible with causal kernels
         causal:bool = True if component == "real" else causal
 
-        self.config = ModelArgs(component=component, scale=scale, causal=causal, fps=fps, fs=fs, n_bins=n_bins)
+        self.config = ModelArgs(
+            component=component, scale=scale, causal=causal, fps=fps, fs=fs, 
+            n_bins=n_bins, apply_sinc_envelope=apply_sinc_envelope
+        )
         self.name = self.config.model_id
-        self.encoder = Encoder1d(self.config, scale=scale)
+        self.encoder = Encoder1d(self.config)
         self.decoder = Decoder1d(self.config)
         self.quantizer = Quantizer(q_bits=q_bits)
 
@@ -311,6 +319,27 @@ class SincNet(nn.Module):
             p.requires_grad = not freeze
         return self
     
+    def plot_kernels(self, save_path:str=None) -> None:
+        """Plot the sinc kernels in the time domain"""
+        if save_path is not None:
+            os.makedirs(save_path, exist_ok=True)
+
+        filters = self.encoder.filters.cpu().numpy().squeeze(1)
+        is_complex = self.config.component == "complex"
+  
+        for i in range(filters.shape[0]):
+            fig, ax = plt.subplots(figsize=(10, 2))
+
+            ax.plot(filters[i].real, color="blue", label="real")
+            if is_complex:
+                ax.plot(filters[i].imag, color="red", label="imag")
+
+            ax.set_title(f"Kernel {i}")
+            ax.legend()
+            fig.tight_layout()
+            if save_path is not None:
+                fig.savefig(os.path.join(save_path, f"kernel_{i}.png"))
+
     def freeze_autoencoder(self) -> None:
         """Freeze the linear filterbank autoencoder"""
         for module in[self.encoder, self.decoder]:
@@ -354,7 +383,8 @@ if __name__ == '__main__':
     x = torch.tensor(x).unsqueeze(0)
     print("Audio file tensor shape", x.shape)
 
-    sinc = SincNet(fs=sr, fps=420, component="complex", scale="mel", n_bins=128)
+    sinc = SincNet(fs=sr, fps=420, component="complex", scale="mel", n_bins=128, apply_sinc_envelope=False)
+    #sinc.plot_kernels(save_path="kernels/")
 
     scalogram = sinc.encode(x.unsqueeze(0))
     print(sinc.decode(scalogram).shape)

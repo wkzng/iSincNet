@@ -222,7 +222,7 @@ class Trainer(BaseTrainer):
             self.train_one_epoch(current_epoch)
             curr_stats = self.evaluate(current_epoch)
             if best_stats[criterion] > curr_stats[criterion]:
-                print(f"New Best Nodel Fiunt at epoch {current_epoch}")
+                print(f"New Best model found at epoch {current_epoch}")
                 best_stats = curr_stats
                 self.save_checkpoint(stats={}, current_epoch=current_epoch, n_steps=self.n_steps)
             self.scheduler.step()
@@ -244,7 +244,7 @@ if __name__ =="__main__":
         'training_id': "gtzan",
         "component": 'complex',
         "model_selection_criterion": "log-L1",
-        "causal": True,
+        "causal": False,
         'frame_rate': 128,
         'spectrogram_scale': "mel",
         "learning_rate": learning_rate,
