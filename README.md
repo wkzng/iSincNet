@@ -24,7 +24,7 @@ The First 5s second of the Audio `audio/invertibility/15033000.mp3`
 
 As discussed in [Section 2.1](https://arxiv.org/pdf/1910.10400), SincNet can be recast as a standard wavelet transform with an envelopped defined by the sinc depending explicitly on the bandwidths as `envelope(x, B) = sinc(B x / 2)`. As a consequen the orignal cos and sine components of the filter are modulated (see example below, where we show causal filters).
 
-| Kernel | index=10 | index=88 |
+| Kernel | index=10 | index=104 |
 |:------:|:-------------------:|:--------------:|
 | Without Sinc Envelope| <img src="illustrations/kernels/nosinc/kernel_10.png" alt="non-causal 15033000" width="260"> | <img src="illustrations/kernels/nosinc/kernel_104.png" alt="causal 15033000" width="260"> |
 | With Sinc Envelope | <img src="illustrations/kernels/sinc/kernel_10.png" alt="non-causal 15033000" width="260"> | <img src="illustrations/kernels/sinc/kernel_104.png" alt="causal 15033000" width="260"> |
