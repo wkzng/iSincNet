@@ -36,17 +36,18 @@ At lower freauencies (~low indices), the sinc envelope's effect are negligible u
 The following table summarizes the key characteristics and access points for the available pretrained models.
 All models are open-source and stored in the `pretrained/` folder.
 
-| Sample Rate | FPS | #Bins | Weights | Corpus | Causal Encoder | Scale | Open-Source |
-|:------------:|:---:|:-----:|:--------|:--------|:----------------:|:-------:|:------------:|
-| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_lin_complex_ncausal.ckpt) | GTZAN | ✗ | Linear | √ |
-| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_lin_real_causal.ckpt) | GTZAN | √ | Linear | √ |
-| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_mel_real_causal.ckpt) | GTZAN | √ | Mel | √ |
-| 16000 | 128 | 256 | [📦](pretrained/16000fs_128fps_256bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | √ |
-| 16000 | 128 | 512 | [📦](pretrained/16000fs_128fps_512bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | √ |
-| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | √ |
-| 44100 | 350 | 128 | [📦](pretrained/44100fs_350fps_128bins_lin_complex_ncausal.ckpt) | GTZAN | ✗ | Linear | √ |
-| 44100 | 350 | 128 | [📦](pretrained/44100fs_350fps_128bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | √ |
-| 44100 | 350 | 256 | [📦](pretrained/44100fs_350fps_256bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | √ |
+| Sample Rate | FPS | #Bins | Weights | Corpus | Causal Encoder | Scale | Sinc Envelope | Open-Source |
+|:------------:|:---:|:-----:|:--------|:--------|:----------------:|:-------:|:-------------:|:------------:|
+| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_lin_complex_ncausal.ckpt) | GTZAN | ✗ | Linear | ✗ | √ |
+| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_lin_real_causal.ckpt) | GTZAN | √ | Linear | ✗ | √ |
+| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_mel_real_causal.ckpt) | GTZAN | √ | Mel | ✗ | √ |
+| 16000 | 128 | 256 | [📦](pretrained/16000fs_128fps_256bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | ✗ | √ |
+| 16000 | 128 | 512 | [📦](pretrained/16000fs_128fps_512bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | ✗ | √ |
+| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | ✗ | √ |
+| 16000 | 128 | 128 | [📦](pretrained/16000fs_128fps_128bins_mel_complex_ncausal_sinc.ckpt) | GTZAN | ✗ | Mel | √ | √ |
+| 44100 | 350 | 128 | [📦](pretrained/44100fs_350fps_128bins_lin_complex_ncausal.ckpt) | GTZAN | ✗ | Linear | ✗ | √ |
+| 44100 | 350 | 128 | [📦](pretrained/44100fs_350fps_128bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | ✗ | √ |
+| 44100 | 350 | 256 | [📦](pretrained/44100fs_350fps_256bins_mel_complex_ncausal.ckpt) | GTZAN | ✗ | Mel | ✗ | √ |
 
 
 
@@ -131,5 +132,3 @@ Related discussion about SincNet vs STFT https://github.com/mravanelli/SincNet/i
 ## Roadmap and projects status
 - [x] Host weights in Github and add auto-download
 - [ ] Benchmark of inversion vs Griffin-Lim, iSTFTNet
-
-## Contributions and acknowledgment (TODO)

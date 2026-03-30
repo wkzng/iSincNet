@@ -50,7 +50,8 @@ class ModelArgs:
     @property
     def model_id(self) -> str:
         causal = "causal" if self.causal else "ncausal"
-        return f"{self.fs}fs_{self.fps}fps_{self.n_bins}bins_{self.scale}_{self.component}_{causal}"
+        base = f"{self.fs}fs_{self.fps}fps_{self.n_bins}bins_{self.scale}_{self.component}_{causal}"
+        return f"{base}_sinc" if self.apply_sinc_envelope else base
 
 
 def compute_forward_mu_law_companding(x:torch.Tensor, q_bits:int) -> torch.Tensor:
