@@ -12,7 +12,6 @@ Datasets used during development:
 - [GTZAN](https://github.com/chittalpatel/Music-Genre-Classification-GTZAN)
 - [MUSDB-18](https://sigsep.github.io/datasets/musdb.html)
 
-
 ## Example Spectrogram 
 The First 5s second of the Audio `audio/invertibility/15033000.mp3`
 
@@ -20,6 +19,17 @@ The First 5s second of the Audio `audio/invertibility/15033000.mp3`
 |:------:|:-------------------:|:--------------:|
 | signed values | <img src="illustrations/spec_noncausal_signed.jpeg" alt="non-causal 15033000" width="260"> | <img src="illustrations/spec_causal_signed.jpeg" alt="causal 15033000" width="260"> |
 | abs values | <img src="illustrations/spec_noncausal_abs.jpeg" alt="non-causal 15033000" width="260"> | <img src="illustrations/spec_causal_abs.jpeg" alt="causal 15033000" width="260"> |
+
+## Effect of applying sincnet envelope 
+
+As discussed in [Section 2.1](https://arxiv.org/pdf/1910.10400), SincNet can be recast as a standard wavelet transform with an envelopped defined by the sinc depending explicitly on the bandwidths as `envelope(x, B) = sinc(B x / 2)`. As a consequen the orignal cos and sine components of the filter are modulated (see example below, where we show causal filters).
+
+| Kernel | index=10 | index=88 |
+|:------:|:-------------------:|:--------------:|
+| Without Sinc Envelope| <img src="illustrations/kernels/nosinc/kernel_10.png" alt="non-causal 15033000" width="260"> | <img src="illustrations/kernels/nosinc/kernel_88.png" alt="causal 15033000" width="260"> |
+| With Sinc Envelope | <img src="illustrations/kernels/sinc/kernel_10.png" alt="non-causal 15033000" width="260"> | <img src="illustrations/kernels/sinc/kernel_88.png" alt="causal 15033000" width="260"> |
+
+At lower freauencies (~low indices), the sinc envelope's effect are negligible unlike higher frequency where it forced the filter to be more localised.
 
 
 ### 🎧 Pretrained Models
