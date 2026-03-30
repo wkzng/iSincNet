@@ -26,8 +26,8 @@ As discussed in [Section 2.1](https://arxiv.org/pdf/1910.10400), SincNet can be 
 
 | Kernel | index=10 | index=88 |
 |:------:|:-------------------:|:--------------:|
-| Without Sinc Envelope| <img src="illustrations/kernels/nosinc/kernel_10.png" alt="non-causal 15033000" width="260"> | <img src="illustrations/kernels/nosinc/kernel_88.png" alt="causal 15033000" width="260"> |
-| With Sinc Envelope | <img src="illustrations/kernels/sinc/kernel_10.png" alt="non-causal 15033000" width="260"> | <img src="illustrations/kernels/sinc/kernel_88.png" alt="causal 15033000" width="260"> |
+| Without Sinc Envelope| <img src="illustrations/kernels/nosinc/kernel_10.png" alt="non-causal 15033000" width="260"> | <img src="illustrations/kernels/nosinc/kernel_104.png" alt="causal 15033000" width="260"> |
+| With Sinc Envelope | <img src="illustrations/kernels/sinc/kernel_10.png" alt="non-causal 15033000" width="260"> | <img src="illustrations/kernels/sinc/kernel_104.png" alt="causal 15033000" width="260"> |
 
 At lower freauencies (~low indices), the sinc envelope's effect are negligible unlike higher frequency where it forced the filter to be more localised.
 
