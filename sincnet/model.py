@@ -6,7 +6,7 @@ import os
 import librosa
 import numpy as np
 from dataclasses import dataclass, asdict
-
+from .mulaw import MuLawQuant
 
 
 
@@ -54,37 +54,6 @@ class ModelArgs:
         return f"{base}_sinc" if self.apply_sinc_envelope else base
 
 
-def compute_forward_mu_law_companding(x:torch.Tensor, q_bits:int) -> torch.Tensor:
-    """ Compute the forward mu-law-companding of a scalogram
-        doc: https://en.wikipedia.org/wiki/%CE%9C-law_algorithm
-    """
-    mu = 2**q_bits - 1
-    return torch.sign(x) * torch.log(1 + mu * torch.abs(x)) / np.log(1 + mu)
-
-
-def compute_backward_mu_law_companding(x:torch.Tensor, q_bits:int) -> torch.Tensor:
-    """ Compute the inverse mu-law-companding of a scalogram
-        doc: https://en.wikipedia.org/wiki/%CE%9C-law_algorithm
-    """
-    mu = 2**q_bits - 1
-    return torch.sign(x) * (1.0 / mu) * ((1.0 + mu)**torch.abs(x) - 1.0)
-
-
-def compute_forward_mu_law_quantize(x:torch.Tensor, q_bits:int) -> torch.Tensor:
-    """transform tensor with values in [-1,1] into a tensor with values in [0, 2^q_bits-1]"""
-    mu = 2**q_bits - 1
-    y = (x + 1) / 2.0
-    y = mu * y
-    y = torch.trunc(y).to(torch.long)
-    return y
-
-
-def compute_backward_mu_law_quantize(x:torch.Tensor, q_bits:int) -> torch.Tensor:
-    """transform tensor with values in [0, 2^q_bits-1] back into [-1,1]"""
-    mu = 2**q_bits - 1
-    y = x.float() / mu
-    y = 2 * y - 1.0
-    return y
 
 
 def lin_freqs(fs:int, n_bins:int) -> np.ndarray:
@@ -259,24 +228,6 @@ class Decoder1d(nn.Module):
 
 
 
-class Quantizer(nn.Module):
-    def __init__(self, q_bits:int):
-        super().__init__()
-        self.q_bits = q_bits
-        self.vocab_size = 2**q_bits
-
-    def forward(self, x:torch.Tensor) -> torch.Tensor:
-        x = compute_forward_mu_law_companding(x, q_bits=self.q_bits)
-        x = compute_forward_mu_law_quantize(x, q_bits=self.q_bits)
-        return x
-        
-    def inverse(self, x:torch.Tensor) -> torch.Tensor:
-        x = compute_backward_mu_law_quantize(x, q_bits=self.q_bits)
-        x = compute_backward_mu_law_companding(x, q_bits=self.q_bits)
-        return x
-
-
-
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
     def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128, 
@@ -305,7 +256,7 @@ class SincNet(nn.Module):
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config)
         self.decoder = Decoder1d(self.config)
-        self.quantizer = Quantizer(q_bits=q_bits)
+        self.quantizer = MuLawQuant(q_bits=q_bits)
 
     def load_pretrained_weights(self, weights_folder:str, freeze:bool=True, device:str="cpu", verbose:bool=False) -> None:
         """ Load pretrained weights for sincnet """
@@ -347,17 +298,12 @@ class SincNet(nn.Module):
                 p.requires_grad = False
         return self
     
-    def encode(self, x:torch.Tensor, quantize:bool=False) -> torch.Tensor:
+    def encode(self, x:torch.Tensor) -> torch.Tensor:
         """Compute the sincNet spectrogram"""
-        x = self.encoder(x)
-        if quantize:
-            x = self.quantizer(x)
-        return x
+        return self.encoder(x)
 
-    def decode(self, x:torch.Tensor, dequantize:bool=False) -> torch.Tensor:
+    def decode(self, x:torch.Tensor) -> torch.Tensor:
         """Reconstruct audio from linear sincNet spectrogram"""
-        if dequantize:
-            x = self.quantizer.inverse(x)
         return self.decoder(x)
     
     def forward(self, x:torch.Tensor) -> torch.Tensor:
@@ -383,7 +329,7 @@ if __name__ == '__main__':
     x = torch.tensor(x).unsqueeze(0)
     print("Audio file tensor shape", x.shape)
 
-    sinc = SincNet(fs=sr, fps=420, component="complex", scale="mel", n_bins=128, apply_sinc_envelope=False)
+    sinc = SincNet(fs=sr, fps=420, component="complex", scale="mel", causal=False, n_bins=128, apply_sinc_envelope=False)
     #sinc.plot_kernels(save_path="kernels/")
 
     scalogram = sinc.encode(x.unsqueeze(0))

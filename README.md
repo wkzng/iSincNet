@@ -97,8 +97,16 @@ waveform = audio_loader.normalise_loudness(waveform, loudness, target_lufs=-23)
 
 with torch.no_grad():
   audio_tensor = torch.from_numpy(waveform).to(device).float()
-  spectrogram = model.encode(audio_tensor.unsqueeze(0), quantize=True)
-  reconstructed_audio_tensor = model.decode(spectrogram, dequantize=True)
+
+  #auto-encoding waveform -> spectrogram -> waveform
+  spectrogram = model.encode(audio_tensor.unsqueeze(0))
+  reconstructed_audio_tensor = model.decode(spectrogram)
+
+  #auto-encoding waveform -> spectrogram -> quantized --> dequantized --> waveform
+  spectrogram = model.encode(audio_tensor.unsqueeze(0))
+  quantized_spectrogram, scale = model.mulaw.quantize(spectrogram)
+  dequantized_spectrogam = model.mulaw.dequantize(quantized_spectrogram, scale)
+  reconstructed_audio_tensor = model.decode(dequantized_spectrogam)
 ```
 
 
