@@ -256,7 +256,7 @@ class SincNet(nn.Module):
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config)
         self.decoder = Decoder1d(self.config)
-        self.quantizer = MuLawQuant(q_bits=q_bits)
+        self.mulaw = MuLawQuant(q_bits=q_bits)
 
     def load_pretrained_weights(self, weights_folder:str, freeze:bool=True, device:str="cpu", verbose:bool=False) -> None:
         """ Load pretrained weights for sincnet """
