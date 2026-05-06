@@ -298,6 +298,39 @@ class SincNet(nn.Module):
                 p.requires_grad = False
         return self
     
+    @torch.no_grad()
+    def magnitude(self, spectrogram:torch.Tensor) -> torch.Tensor:
+        """Compute the magnitude spectrogram of the input signal"""
+        if self.config.component == "complex":
+            real, imag = spectrogram.chunk(2, dim=1)
+            magnitude = torch.sqrt(real**2 + imag**2)
+        else:
+            magnitude = spectrogram.abs()
+        return magnitude
+    
+    @torch.no_grad()
+    def griffin_lim(self, magnitude:torch.Tensor, n_iters:int=50) -> torch.Tensor:
+        """Reconstruct audio from magnitude spectrogram using the Griffin-Lim algorithm"""  
+        angle = torch.rand_like(magnitude) * 2 * np.pi
+    
+        for i in range(n_iters+1):
+            if self.config.component == "real":
+                spectrogram = magnitude * torch.cos(angle)
+                forward = self.encode(self.decode(spectrogram))
+                angle = forward.sign()
+            elif self.config.component == "imag":
+                spectrogram = magnitude * torch.sin(angle)
+                forward = self.encode(self.decode(spectrogram))
+                angle = forward.sign()
+            else:
+                spectrogram = magnitude * torch.cat([torch.cos(angle), torch.sin(angle)], dim=1)
+                forward = self.encode(self.decode(spectrogram))
+                real, imag = forward.chunk(2, dim=1)
+                angle = torch.atan2(imag, real)
+
+        inverse = self.decode(spectrogram)
+        return spectrogram, inverse
+
     def encode(self, x:torch.Tensor) -> torch.Tensor:
         """Compute the sincNet spectrogram"""
         return self.encoder(x)
@@ -324,12 +357,12 @@ if __name__ == '__main__':
     print("Loading audio file....")
     audio_file_path = "audio/invertibility/15033000.mp3"
 
-    sr = 44100
+    sr = 16000
     x, sr = librosa.load(audio_file_path, sr=sr, offset=0, duration=1)
     x = torch.tensor(x).unsqueeze(0)
     print("Audio file tensor shape", x.shape)
 
-    sinc = SincNet(fs=sr, fps=420, component="complex", scale="mel", causal=False, n_bins=128, apply_sinc_envelope=False)
+    sinc = SincNet(fs=sr, fps=128, component="complex", scale="mel", causal=False, n_bins=128, apply_sinc_envelope=False)
     #sinc.plot_kernels(save_path="kernels/")
 
     scalogram = sinc.encode(x.unsqueeze(0))
