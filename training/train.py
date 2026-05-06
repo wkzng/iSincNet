@@ -169,6 +169,7 @@ class Trainer(BaseTrainer):
                         "tL2": F.mse_loss(reconstructed_wav, transformed_wav),
                         "nrj": F.mse_loss(reconstructed_nrj, transformed_nrj).detach(),
                         "msl": F.l1_loss(transformed_stft, reconstructed_stft),
+                        "W": model.compute_loss()
                     }
                     for k, value in batch_losses.items():
                         if isinstance(value, torch.Tensor) and torch.isfinite(value):
@@ -180,7 +181,7 @@ class Trainer(BaseTrainer):
                     train_loss += loss / len(transforms)
 
             #skip the backprop step if the loss is ill-defined
-            if not isinstance(train_loss, torch.Tensor) or not torch.isfinite(loss):
+            if not isinstance(train_loss, torch.Tensor) or not torch.isfinite(train_loss):
                 print("Skipping....")
                 continue
             
@@ -235,6 +236,7 @@ if __name__ =="__main__":
     from datasets.configs import BaseDatasetConfig
     from datasets.dataset import ChunkDataset
     from sincnet.model import SincNet
+    from torchinfo import summary
 
     learning_rate = 1e-4
     args = TrainConfig(**{
@@ -242,7 +244,7 @@ if __name__ =="__main__":
         "n_epoch": 500,
         "sample_rate": 16_000,
         'training_id': "gtzan",
-        "component": 'complex',
+        "component": 'real',
         "model_selection_criterion": "log-L1",
         "causal": False,
         'frame_rate': 128,
@@ -262,8 +264,10 @@ if __name__ =="__main__":
         causal=args.causal,
         fs=args.sample_rate,  
         fps=args.frame_rate, 
-        component=args.component
+        component=args.component,
     )
+    #model.freeze_autoencoder()
+    #summary(model, input_size=(args.batch_size, 1, args.sample_rate), device="cpu")
 
     datasets = {
         split:ChunkDataset(
@@ -281,9 +285,9 @@ if __name__ =="__main__":
         config=args
     )
 
-    try:
-        model.load_pretrained_weights(weights_folder="pretrained", freeze=False)
-    except:
-        pass
+    # try:
+    #     model.load_pretrained_weights(weights_folder="pretrained", freeze=False)
+    # except:
+    #     pass
 
     trainer.train()

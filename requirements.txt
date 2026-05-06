@@ -17,3 +17,4 @@ pandas
 pyarrow
 torchinfo
 pyloudnorm
+ipykernel==6.30.1

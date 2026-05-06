@@ -228,7 +228,7 @@ class Decoder1d(nn.Module):
 
 
 
-class SincNet(nn.Module):
+class SincNetX(nn.Module):
     """Custom mixed time and frequency trasnform """
     def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128, 
                  q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False):
@@ -344,6 +344,84 @@ class SincNet(nn.Module):
         x = self.decode(x)
         return x
 
+
+
+
+
+class SincNet(nn.Module):
+    def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128, 
+                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False):
+        super().__init__()
+        assert component in ("real", "complex")
+        #NOTE: check that the number of bins is a power of 2
+        assert n_bins > 0 and (n_bins & (n_bins - 1)) == 0
+        #NOTE: real component is only compatible with causal kernels
+        causal:bool = True if component == "real" else causal
+
+        self.config = ModelArgs(
+            component=component, scale=scale, causal=causal, fps=fps, fs=fs, 
+            n_bins=n_bins, apply_sinc_envelope=apply_sinc_envelope
+        )
+        self.name = self.config.model_id
+        self.mulaw = MuLawQuant(q_bits=q_bits)
+        self.W = nn.Parameter(
+            torch.randn(self.config.hop_length, self.config.n_bins), 
+            requires_grad=True
+        )
+
+        # self.Winv = nn.Parameter(
+        #     torch.randn(self.config.n_bins, self.config.hop_length), 
+        #     requires_grad=True
+        # )
+
+    def load_pretrained_weights(self, weights_folder:str, freeze:bool=True, device:str="cpu", verbose:bool=False) -> None:
+        """ Load pretrained weights for sincnet """
+        weights_path = os.path.join(weights_folder, f"{self.name}.ckpt")
+        checkpoint = torch.load(weights_path, map_location=torch.device(device))
+        if verbose:
+            print(f"Loading SincNet:{weights_path}...")
+            print("EPOCH", checkpoint["epoch"], "// NSTEP", checkpoint["n_steps"]) 
+        self.load_state_dict(checkpoint["state_dict"], strict=True)
+        for p in self.parameters():
+            p.requires_grad = not freeze
+        return self
+    
+    def encode(self, x:torch.Tensor) -> torch.Tensor:
+        """Compute the sincNet spectrogram"""
+        if len(x.shape) < 3:
+            x = x.unsqueeze(1)
+        elif x.size(1) != 1:
+            raise ValueError("Expected mono waveform (B,1,L)")
+
+        hop_length = self.config.hop_length
+        x = x.unfold(2, size=hop_length, step=hop_length)
+        x = x @ self.W
+        x = x.transpose(-1, -2)  #(B, 1, F, T)
+        return x
+
+    def decode(self, x:torch.Tensor) -> torch.Tensor:
+        """Reconstruct audio from linear sincNet spectrogram"""
+        Winv = torch.pinverse(self.W)
+        x = x.transpose(-1, -2) #(F, T) -> (T, F)
+        x = x @ Winv
+        x = x.flatten(1)
+        return x
+
+    def compute_loss(self) -> torch.Tensor:
+        """Compute the reconstruction loss between the input and the reconstructed audio"""
+        W = self.W
+        lambda_smooth = 0.1
+        lambda_adjacent = 0.1
+        loss = 0
+        loss += lambda_smooth * (W[2:] - 2*W[1:-1] + W[:-2]).pow(2).mean()
+        loss += lambda_adjacent * (W[:, 1:] - W[:, :-1]).pow(2).mean()
+        return loss
+    
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
+        x = self.encode(x)
+        x = self.decode(x)
+        return x
+    
 
 
 
