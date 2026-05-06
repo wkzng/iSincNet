@@ -169,7 +169,6 @@ class Trainer(BaseTrainer):
                         "tL2": F.mse_loss(reconstructed_wav, transformed_wav),
                         "nrj": F.mse_loss(reconstructed_nrj, transformed_nrj).detach(),
                         "msl": F.l1_loss(transformed_stft, reconstructed_stft),
-                        "W": model.compute_loss()
                     }
                     for k, value in batch_losses.items():
                         if isinstance(value, torch.Tensor) and torch.isfinite(value):

@@ -349,30 +349,46 @@ class SincNetX(nn.Module):
 
 
 class SincNet(nn.Module):
-    def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128, 
-                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False):
+    def __init__(
+        self, fs:int=16000, fps:int=128, scale:str="lin", n_bins:int=128, 
+        q_bits:int=8, fourier_init:bool=False, **kwargs
+    ):
         super().__init__()
-        assert component in ("real", "complex")
-        #NOTE: check that the number of bins is a power of 2
         assert n_bins > 0 and (n_bins & (n_bins - 1)) == 0
         #NOTE: real component is only compatible with causal kernels
-        causal:bool = True if component == "real" else causal
+        self.config = config = ModelArgs(
+            component="real", causal=True, 
+            scale=scale, fps=fps, fs=fs, n_bins=n_bins
+        )
 
-        self.config = ModelArgs(
-            component=component, scale=scale, causal=causal, fps=fps, fs=fs, 
-            n_bins=n_bins, apply_sinc_envelope=apply_sinc_envelope
-        )
-        self.name = self.config.model_id
+        self.name = self.config.model_id.replace("_causal", "_sinc" if fourier_init else "_free")
         self.mulaw = MuLawQuant(q_bits=q_bits)
-        self.W = nn.Parameter(
-            torch.randn(self.config.hop_length, self.config.n_bins), 
-            requires_grad=True
-        )
+
+        if fourier_init:
+            filters = compute_complex_kernel(
+                kernel_size=config.hop_length,
+                fs=config.fs,
+                n_bins=config.n_bins,
+                scale=config.scale,
+                causal=False,
+                apply_sinc_envelope=config.apply_sinc_envelope
+            )
+            W_init = self.preprocess_prior_filters(filters)
+        else:
+            W_init = torch.randn(config.hop_length, config.n_bins)
+
+        self.W = nn.Parameter(W_init, requires_grad=True)
 
         # self.Winv = nn.Parameter(
         #     torch.randn(self.config.n_bins, self.config.hop_length), 
         #     requires_grad=True
         # )
+
+    def preprocess_prior_filters(self, filters:torch.Tensor) -> torch.Tensor:
+        """Normalize the prior kernel bank and convert it to the real W matrix."""
+        weights = F.normalize(filters.real, dim=1, p=1)
+        weights = weights.T.contiguous()
+        return weights
 
     def load_pretrained_weights(self, weights_folder:str, freeze:bool=True, device:str="cpu", verbose:bool=False) -> None:
         """ Load pretrained weights for sincnet """
@@ -395,13 +411,13 @@ class SincNet(nn.Module):
 
         hop_length = self.config.hop_length
         x = x.unfold(2, size=hop_length, step=hop_length)
-        x = x @ self.W
+        x = x @ self.W #F.normalize(self.W, dim=1, p=2)
         x = x.transpose(-1, -2)  #(B, 1, F, T)
         return x
 
     def decode(self, x:torch.Tensor) -> torch.Tensor:
         """Reconstruct audio from linear sincNet spectrogram"""
-        Winv = torch.pinverse(self.W)
+        Winv = torch.pinverse(self.W) # torch.pinverse(F.normalize(self.W, dim=1, p=2))
         x = x.transpose(-1, -2) #(F, T) -> (T, F)
         x = x @ Winv
         x = x.flatten(1)
