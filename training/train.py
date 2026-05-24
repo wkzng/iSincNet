@@ -243,10 +243,11 @@ if __name__ =="__main__":
         "n_epoch": 500,
         "sample_rate": 16_000,
         'training_id': "gtzan",
-        "component": 'real',
+        "component": 'complex',
         "model_selection_criterion": "log-L1",
         "causal": False,
         'frame_rate': 128,
+        "n_bins": 256,
         'spectrogram_scale': "mel",
         "learning_rate": learning_rate,
         "weight_decay": learning_rate / 10,
@@ -264,9 +265,8 @@ if __name__ =="__main__":
         fs=args.sample_rate,  
         fps=args.frame_rate, 
         component=args.component,
+        n_bins=args.n_bins
     )
-    #model.freeze_autoencoder()
-    #summary(model, input_size=(args.batch_size, 1, args.sample_rate), device="cpu")
 
     datasets = {
         split:ChunkDataset(
@@ -284,9 +284,9 @@ if __name__ =="__main__":
         config=args
     )
 
-    # try:
-    #     model.load_pretrained_weights(weights_folder="pretrained", freeze=False)
-    # except:
-    #     pass
+    try:
+        model.load_pretrained_weights(weights_folder="pretrained", freeze=False)
+    except:
+        pass
 
     trainer.train()

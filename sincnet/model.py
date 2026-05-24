@@ -228,7 +228,7 @@ class Decoder1d(nn.Module):
 
 
 
-class SincNetX(nn.Module):
+class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
     def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128, 
                  q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False):
@@ -346,102 +346,6 @@ class SincNetX(nn.Module):
 
 
 
-
-
-class SincNet(nn.Module):
-    def __init__(
-        self, fs:int=16000, fps:int=128, scale:str="lin", n_bins:int=128, 
-        q_bits:int=8, fourier_init:bool=False, **kwargs
-    ):
-        super().__init__()
-        assert n_bins > 0 and (n_bins & (n_bins - 1)) == 0
-        #NOTE: real component is only compatible with causal kernels
-        self.config = config = ModelArgs(
-            component="real", causal=True, 
-            scale=scale, fps=fps, fs=fs, n_bins=n_bins
-        )
-
-        self.name = self.config.model_id.replace("_causal", "_sinc" if fourier_init else "_free")
-        self.mulaw = MuLawQuant(q_bits=q_bits)
-
-        if fourier_init:
-            filters = compute_complex_kernel(
-                kernel_size=config.hop_length,
-                fs=config.fs,
-                n_bins=config.n_bins,
-                scale=config.scale,
-                causal=False,
-                apply_sinc_envelope=config.apply_sinc_envelope
-            )
-            W_init = self.preprocess_prior_filters(filters)
-        else:
-            W_init = torch.randn(config.hop_length, config.n_bins)
-
-        self.W = nn.Parameter(W_init, requires_grad=True)
-
-        # self.Winv = nn.Parameter(
-        #     torch.randn(self.config.n_bins, self.config.hop_length), 
-        #     requires_grad=True
-        # )
-
-    def preprocess_prior_filters(self, filters:torch.Tensor) -> torch.Tensor:
-        """Normalize the prior kernel bank and convert it to the real W matrix."""
-        weights = F.normalize(filters.real, dim=1, p=1)
-        weights = weights.T.contiguous()
-        return weights
-
-    def load_pretrained_weights(self, weights_folder:str, freeze:bool=True, device:str="cpu", verbose:bool=False) -> None:
-        """ Load pretrained weights for sincnet """
-        weights_path = os.path.join(weights_folder, f"{self.name}.ckpt")
-        checkpoint = torch.load(weights_path, map_location=torch.device(device))
-        if verbose:
-            print(f"Loading SincNet:{weights_path}...")
-            print("EPOCH", checkpoint["epoch"], "// NSTEP", checkpoint["n_steps"]) 
-        self.load_state_dict(checkpoint["state_dict"], strict=True)
-        for p in self.parameters():
-            p.requires_grad = not freeze
-        return self
-    
-    def encode(self, x:torch.Tensor) -> torch.Tensor:
-        """Compute the sincNet spectrogram"""
-        if len(x.shape) < 3:
-            x = x.unsqueeze(1)
-        elif x.size(1) != 1:
-            raise ValueError("Expected mono waveform (B,1,L)")
-
-        hop_length = self.config.hop_length
-        x = x.unfold(2, size=hop_length, step=hop_length)
-        x = x @ self.W #F.normalize(self.W, dim=1, p=2)
-        x = x.transpose(-1, -2)  #(B, 1, F, T)
-        return x
-
-    def decode(self, x:torch.Tensor) -> torch.Tensor:
-        """Reconstruct audio from linear sincNet spectrogram"""
-        Winv = torch.pinverse(self.W) # torch.pinverse(F.normalize(self.W, dim=1, p=2))
-        x = x.transpose(-1, -2) #(F, T) -> (T, F)
-        x = x @ Winv
-        x = x.flatten(1)
-        return x
-
-    def compute_loss(self) -> torch.Tensor:
-        """Compute the reconstruction loss between the input and the reconstructed audio"""
-        W = self.W
-        lambda_smooth = 0.1
-        lambda_adjacent = 0.1
-        loss = 0
-        loss += lambda_smooth * (W[2:] - 2*W[1:-1] + W[:-2]).pow(2).mean()
-        loss += lambda_adjacent * (W[:, 1:] - W[:, :-1]).pow(2).mean()
-        return loss
-    
-    def forward(self, x:torch.Tensor) -> torch.Tensor:
-        x = self.encode(x)
-        x = self.decode(x)
-        return x
-    
-
-
-
-
 if __name__ == '__main__':
     from torchinfo import summary
     import matplotlib.pyplot as plt
@@ -456,7 +360,7 @@ if __name__ == '__main__':
     x = torch.tensor(x).unsqueeze(0)
     print("Audio file tensor shape", x.shape)
 
-    sinc = SincNet(fs=sr, fps=128, component="complex", scale="mel", causal=False, n_bins=128, apply_sinc_envelope=False)
+    sinc = SincNet(fs=sr, fps=128, component="real", scale="mel", causal=False, n_bins=256, apply_sinc_envelope=False)
     #sinc.plot_kernels(save_path="kernels/")
 
     scalogram = sinc.encode(x.unsqueeze(0))
