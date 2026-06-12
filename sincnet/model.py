@@ -321,7 +321,7 @@ class SincNet(nn.Module):
         if initial_angle is None:
             angle = torch.rand_like(magnitude) * 2 * np.pi
         else:
-            angle = initial_angle if initial_angle.ndim == 3 else initial_angle.unsqueeze(1)
+            angle = initial_angle.unsqueeze(1) if initial_angle.ndim == 3 else initial_angle
 
         for _ in range(n_iters+1):
             spectrogram = magnitude * torch.cat([torch.cos(angle), torch.sin(angle)], dim=1)
