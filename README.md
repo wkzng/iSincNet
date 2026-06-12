@@ -1,16 +1,16 @@
 <div align="center">
-<img src="illustrations/logo1.png" alt="isincnet" width="35%"/>
-<h1>iSincNet (Lightweight Sincnet Spectrogram Vocoder)</h1>
+<img src="illustrations/logo.png" alt="isincnet" width="50%"/>
+<h1>iSincNet / Fast Invertible Audio Frontend</h1>
+
+<em>A drop-in, differentiable spectrogram layer for PyTorch that decodes back to waveforms.<br/>Linear, interpretable, CPU-fast. Handles spectrogram in various scales (linear, MEL, Bark, ERB)</em>
+<br/><br/>
 
 [![CI](https://github.com/wkzng/iSincNet/actions/workflows/ci.yml/badge.svg)](https://github.com/wkzng/iSincNet/actions/workflows/ci.yml)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
-[![License: Proprietary](https://img.shields.io/badge/license-Proprietary-lightgrey.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 </div>
 
 ---
-
-[[Blog]](https://github.com/wkzng/iSincNet) [[Original SincNet Paper (M. Ravenelli, Y. Bengio)]](https://arxiv.org/abs/1808.00158)
-
 iSincNet is as Fast and Lightweight Sincnet Spectrogram Vocoder neural network trained to reconstruct audio waveforms from their SincNet spectogram (real and signed 2d representation). We used the GTZAN dataset which is the most-used public dataset for evaluation in machine listening research for music genre recognition (MGR). The files were collected in 2000-2001 from a variety of sources including personal CDs, radio, microphone recordings, in order to represent a variety of recording conditions (http://marsyas.info/downloads/datasets.html).
 
 <p align="center">
