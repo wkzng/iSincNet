@@ -83,7 +83,65 @@ def mel_freqs(fs:int, n_bins:int) -> np.ndarray:
 
     centers = librosa.mel_to_hz(centers_mel, htk=False)
     edges = librosa.mel_to_hz(edges_mel, htk=False)
-    
+
+    bands = np.diff(edges)
+    return centers, bands
+
+
+def hz_to_bark(f:np.ndarray) -> np.ndarray:
+    """Hz -> Bark using the Traunmüller (1990) formula z = 26.81*f/(1960+f) - 0.53"""
+    return 26.81 * f / (1960.0 + f) - 0.53
+
+
+def bark_to_hz(z:np.ndarray) -> np.ndarray:
+    """Bark -> Hz, inverse of the Traunmüller (1990) formula f = 1960*(z+0.53)/(26.28-z)"""
+    return 1960.0 * (z + 0.53) / (26.28 - z)
+
+
+def bark_freqs(fs:int, n_bins:int) -> np.ndarray:
+    """The transform function is BARK (critical-band rate, Traunmüller 1990)"""
+    fmin = 0
+    fmax = fs // 2
+
+    fmin = hz_to_bark(fmin)
+    fmax = hz_to_bark(fmax)
+    centers_bark = np.linspace(fmin, fmax, n_bins)
+
+    bark_step  = centers_bark[1] - centers_bark[0]
+    edges_bark = np.linspace(centers_bark[0] - bark_step / 2, centers_bark[-1] + bark_step / 2, n_bins + 1)
+
+    centers = bark_to_hz(centers_bark)
+    edges = bark_to_hz(edges_bark)
+
+    bands = np.diff(edges)
+    return centers, bands
+
+
+def hz_to_erb(f:np.ndarray) -> np.ndarray:
+    """Hz -> ERB-rate (Glasberg & Moore 1990) E = 21.4*log10(1 + 0.00437*f)"""
+    return 21.4 * np.log10(1.0 + 0.00437 * f)
+
+
+def erb_to_hz(e:np.ndarray) -> np.ndarray:
+    """ERB-rate -> Hz, inverse of the Glasberg & Moore (1990) formula f = (10^(E/21.4) - 1)/0.00437"""
+    return (np.power(10.0, e / 21.4) - 1.0) / 0.00437
+
+
+def erb_freqs(fs:int, n_bins:int) -> np.ndarray:
+    """The transform function is ERB (equivalent rectangular bandwidth rate, Glasberg & Moore 1990)"""
+    fmin = 0
+    fmax = fs // 2
+
+    fmin = hz_to_erb(fmin)
+    fmax = hz_to_erb(fmax)
+    centers_erb = np.linspace(fmin, fmax, n_bins)
+
+    erb_step  = centers_erb[1] - centers_erb[0]
+    edges_erb = np.linspace(centers_erb[0] - erb_step / 2, centers_erb[-1] + erb_step / 2, n_bins + 1)
+
+    centers = erb_to_hz(centers_erb)
+    edges = erb_to_hz(edges_erb)
+
     bands = np.diff(edges)
     return centers, bands
 
@@ -106,8 +164,12 @@ def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causa
         freq_hz, band_hz = lin_freqs(fs=fs, n_bins=n_bins)
     elif scale == "mel":
         freq_hz, band_hz = mel_freqs(fs=fs, n_bins=n_bins)
+    elif scale == "bark":
+        freq_hz, band_hz = bark_freqs(fs=fs, n_bins=n_bins)
+    elif scale == "erb":
+        freq_hz, band_hz = erb_freqs(fs=fs, n_bins=n_bins)
     else:
-        raise ValueError("Only lin, mel scales are supported for the SincNet Kernel")
+        raise ValueError("Only lin, mel, bark, erb scales are supported for the SincNet Kernel")
     
     #compute time intervals
     t = torch.linspace(-1/2, 1/2, steps=kernel_size).view(1,-1) * kernel_size / fs
@@ -235,7 +297,7 @@ class SincNet(nn.Module):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
             fps: int: number of frequency bins in the final 2D spectrogram
-            scale: str : mel/lin determine the freauency spacing
+            scale: str : lin/mel/bark/erb determine the freauency spacing
             component:str : real/complex with real producing a the cos transform while complex produce the cos ans sin transforms
             n_bins: int : number of freauency bins to generate
             q_bits: int : number of bits used by the spectrogram quantizer
@@ -367,15 +429,18 @@ if __name__ == '__main__':
     x = torch.tensor(x).unsqueeze(0)
     print("Audio file tensor shape", x.shape)
 
-    sinc = SincNet(fs=sr, fps=128, component="real", scale="mel", causal=False, n_bins=256, apply_sinc_envelope=False)
-    #sinc.plot_kernels(save_path="kernels/")
+    
+    component = "complex"
+    for scale in ["lin", "mel", "bark", "erb"]:
+        sinc = SincNet(fs=sr, fps=128, component=component, scale=scale, causal=False, n_bins=256, apply_sinc_envelope=False)
+        #sinc.plot_kernels(save_path="kernels/")
 
-    scalogram = sinc.encode(x.unsqueeze(0))
-    print(sinc.decode(scalogram).shape)
-    print(scalogram.shape, scalogram.min(), scalogram.max())
+        scalogram = sinc.encode(x.unsqueeze(0))
+        print(sinc.decode(scalogram).shape)
+        print(scalogram.shape, scalogram.min(), scalogram.max())
 
+        plt.imshow(scalogram.flatten(1,2)[0].detach().numpy())
+        plt.savefig(f"spectral_representation_{sinc.config.scale}.png")
 
-    plt.imshow(scalogram.flatten(1,2)[0].detach().numpy())
-    plt.savefig(f"spectral_representation.png")
-
+    
     summary(sinc, input_data=x)
