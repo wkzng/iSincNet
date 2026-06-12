@@ -1,4 +1,13 @@
-# iSincNet (Lightweight Sincnet Spectrogram Vocoder)
+<div align="center">
+<img src="illustrations/logo1.png" alt="isincnet" width="35%"/>
+<h1>iSincNet (Lightweight Sincnet Spectrogram Vocoder)</h1>
+
+[![CI](https://github.com/wkzng/iSincNet/actions/workflows/ci.yml/badge.svg)](https://github.com/wkzng/iSincNet/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
+[![License: Proprietary](https://img.shields.io/badge/license-Proprietary-lightgrey.svg)](LICENSE)
+</div>
+
+---
 
 [[Blog]](https://github.com/wkzng/iSincNet) [[Original SincNet Paper (M. Ravenelli, Y. Bengio)]](https://arxiv.org/abs/1808.00158)
 
