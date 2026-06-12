@@ -24,6 +24,7 @@ class TrainConfig:
     spectrogram_scale: str = "mel",
     model_selection_criterion: str = "log-L1"
     frame_rate: int = 128
+    n_bins: int = 128
     batch_size : int = 4
     train_workers : int = 8
     val_workers : int = 2

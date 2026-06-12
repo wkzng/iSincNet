@@ -298,20 +298,58 @@ class SincNet(nn.Module):
                 p.requires_grad = False
         return self
     
+    @torch.no_grad()
+    def magnitude(self, spectrogram:torch.Tensor) -> torch.Tensor:
+        """Compute the magnitude spectrogram ~ (B,1,F,T) on the input signal"""
+        if self.config.component == "complex":
+            real, imag = spectrogram.chunk(2, dim=1)
+            magnitude = torch.sqrt(real**2 + imag**2)
+        else:
+            magnitude = spectrogram.abs()
+        return magnitude
+    
+    @torch.no_grad()
+    def griffin_lim(self, magnitude:torch.Tensor, initial_angle:torch.Tensor|None=None, n_iters:int=50) -> torch.Tensor:
+        """ Reconstruct audio from magnitude spectrogram using the Griffin-Lim algorithm
+            magnitude ~ (B,1,F,T) or (B,F,T) | initial_angle ~ (B,1,F,T)
+            returns complex spectrogram ~ (B,2,F,T)
+        """
+        assert self.config.component == "complex", "GLA requires complex spectrogram"
+
+        if magnitude.ndim == 3:
+            magnitude = magnitude.unsqueeze(1)
+        if initial_angle is None:
+            angle = torch.rand_like(magnitude) * 2 * np.pi
+        else:
+            angle = initial_angle.unsqueeze(1) if initial_angle.ndim == 3 else initial_angle
+
+        for _ in range(n_iters+1):
+            spectrogram = magnitude * torch.cat([torch.cos(angle), torch.sin(angle)], dim=1)
+            forward = self.encode(self.decode(spectrogram))
+            real, imag = forward.chunk(2, dim=1)
+            angle = torch.atan2(imag, real)
+        return spectrogram
+
+    @torch.no_grad()
+    def refine_spectrogram_phase(self, spectrogram:torch.Tensor, n_iters:int=50) -> torch.Tensor:
+        """Refine the phase of the input spectrogram ~(B,2,F,T) using the Griffin-Lim algorithm """
+        magnitude = self.magnitude(spectrogram)
+        real, imag = spectrogram.chunk(2, dim=1)
+        initial_angle = torch.atan2(imag, real)
+        return self.griffin_lim(magnitude, initial_angle=initial_angle, n_iters=n_iters)
+
     def encode(self, x:torch.Tensor) -> torch.Tensor:
-        """Compute the sincNet spectrogram"""
+        """Compute the sincNet spectrogram ~ (B,C,F,T)"""
         return self.encoder(x)
 
     def decode(self, x:torch.Tensor) -> torch.Tensor:
-        """Reconstruct audio from linear sincNet spectrogram"""
+        """Reconstruct audio from linear sincNet spectrogram ~ (B,L)"""
         return self.decoder(x)
     
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         x = self.encode(x)
         x = self.decode(x)
         return x
-
-
 
 
 
@@ -324,12 +362,12 @@ if __name__ == '__main__':
     print("Loading audio file....")
     audio_file_path = "audio/invertibility/15033000.mp3"
 
-    sr = 44100
+    sr = 16000
     x, sr = librosa.load(audio_file_path, sr=sr, offset=0, duration=1)
     x = torch.tensor(x).unsqueeze(0)
     print("Audio file tensor shape", x.shape)
 
-    sinc = SincNet(fs=sr, fps=420, component="complex", scale="mel", causal=False, n_bins=128, apply_sinc_envelope=False)
+    sinc = SincNet(fs=sr, fps=128, component="real", scale="mel", causal=False, n_bins=256, apply_sinc_envelope=False)
     #sinc.plot_kernels(save_path="kernels/")
 
     scalogram = sinc.encode(x.unsqueeze(0))

@@ -180,7 +180,7 @@ class Trainer(BaseTrainer):
                     train_loss += loss / len(transforms)
 
             #skip the backprop step if the loss is ill-defined
-            if not isinstance(train_loss, torch.Tensor) or not torch.isfinite(loss):
+            if not isinstance(train_loss, torch.Tensor) or not torch.isfinite(train_loss):
                 print("Skipping....")
                 continue
             
@@ -235,6 +235,7 @@ if __name__ =="__main__":
     from datasets.configs import BaseDatasetConfig
     from datasets.dataset import ChunkDataset
     from sincnet.model import SincNet
+    from torchinfo import summary
 
     learning_rate = 1e-4
     args = TrainConfig(**{
@@ -246,6 +247,7 @@ if __name__ =="__main__":
         "model_selection_criterion": "log-L1",
         "causal": False,
         'frame_rate': 128,
+        "n_bins": 256,
         'spectrogram_scale': "mel",
         "learning_rate": learning_rate,
         "weight_decay": learning_rate / 10,
@@ -262,7 +264,8 @@ if __name__ =="__main__":
         causal=args.causal,
         fs=args.sample_rate,  
         fps=args.frame_rate, 
-        component=args.component
+        component=args.component,
+        n_bins=args.n_bins
     )
 
     datasets = {
