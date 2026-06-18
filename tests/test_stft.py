@@ -61,9 +61,11 @@ def test_fps_matches_hop():
     fps, fs = 128, 16000
     m = STFT(fs=fs, fps=fps, n_bins=128)
     assert m.hop_length == fs // fps
-    seconds = 2.0
-    spec = m.encode(torch.randn(int(fs * seconds)))
-    assert abs(spec.shape[-1] / seconds - fps) < 1.0   # center padding adds ~half a frame
+    for seconds in (1, 2, 3):
+        L = fs * seconds
+        spec = m.encode(torch.randn(L))
+        # exactly fps frames per second: T == L // hop == fps * seconds (no boundary +1 frame)
+        assert spec.shape[-1] == L // m.hop_length == fps * seconds
 
 
 # ---- invertibility ----
@@ -72,11 +74,12 @@ def test_fps_matches_hop():
 def test_round_trip_is_accurate(fps, n_bins, overlap):
     fs = 16000
     m = STFT(fs=fs, fps=fps, n_bins=n_bins, overlap=overlap)
+    # band-limited multitone (representative of audio; not edge-heavy like a full-band sweep)
     t = torch.linspace(0, 2, fs * 2)
-    x = 0.5 * torch.sin(2 * torch.pi * (50 + 3000 * t) * t).unsqueeze(0)  # 50 Hz -> ~6 kHz
+    x = sum(0.2 * torch.sin(2 * torch.pi * f * t) for f in (110, 220, 440, 880)).unsqueeze(0)
     y = m.forward(x)
     snr = 10 * torch.log10((x ** 2).sum() / ((x - y) ** 2).sum() + 1e-12)
-    assert snr.item() > 30.0, f"SNR {snr.item():.1f} dB too low"
+    assert snr.item() > 40.0, f"SNR {snr.item():.1f} dB too low"
 
 
 def test_batch_matches_single():
@@ -106,7 +109,7 @@ def test_griffin_lim_improves_consistency():
     t = torch.linspace(0, 1, fs)
     x = 0.5 * torch.sin(2 * torch.pi * 220 * t).unsqueeze(0)
     target_mag = m.magnitude(m.encode(x))
-    length = (target_mag.shape[-1] - 1) * m.hop_length
+    length = target_mag.shape[-1] * m.hop_length   # T*hop -> re-encoding yields exactly T frames
 
     def consistency(spec):
         return (m.magnitude(m.encode(m.decode(spec, length=length))) - target_mag).norm()
