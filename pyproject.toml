@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "iSincNet"
-version = "0.8.0"
+version = "0.9.0"
 authors = [{ name = "Williams Zanga", email = "zanga.williams@gmail.com" }]
 description = "Fast Lightweight invertible SincNet"
 readme = "README.md"
