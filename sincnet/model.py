@@ -27,13 +27,14 @@ class ModelArgs:
             fs = 22050 = 2^1 * (3*5*7)^2    so interesting candidates for FPS are {45 49 50 63 70 75 90 98 105 126 147 150}
             fs = 44100 = (2*3*5*7)^2        so interesting candidates for FPS are same as for 22050 and their doubles
     """
-    component: str 
+    component: str
     causal: bool
     scale: str
     n_bins: int
     fps: int
     fs: int
     apply_sinc_envelope: bool = False
+    decoder: str = "conv"
 
     @property
     def args(self) -> dict:
@@ -51,7 +52,12 @@ class ModelArgs:
     def model_id(self) -> str:
         causal = "causal" if self.causal else "ncausal"
         base = f"{self.fs}fs_{self.fps}fps_{self.n_bins}bins_{self.scale}_{self.component}_{causal}"
-        return f"{base}_sinc" if self.apply_sinc_envelope else base
+        if self.apply_sinc_envelope:
+            base = f"{base}_sinc"
+        #NOTE: the default conv decoder keeps the legacy name (backward-compatible with pretrained ckpts)
+        if self.decoder != "conv":
+            base = f"{base}_{self.decoder}"
+        return base
 
 
 
@@ -255,19 +261,26 @@ class Encoder1d(nn.Module):
 
 
 class Decoder1d(nn.Module):
-    def __init__(self, config:ModelArgs):
+    def __init__(self, config:ModelArgs, normalize:bool=False):
         super().__init__()
         self.config = config
         self.factor = 2 if config.component == "complex" else 1
+        in_channels = self.factor * config.n_bins
+        # Optional freq-axis GroupNorm (2 groups = real/imag blocks). The warped sinc spectrogram
+        # has tiny ~1e-3 magnitudes; normalising the input lets the conv train far faster/higher.
+        self.norm = nn.GroupNorm(num_groups=2, num_channels=in_channels) if normalize else nn.Identity()
         self.conv1d = nn.Conv1d(
-            self.factor * config.n_bins, 
-            config.hop_length, 
+            in_channels,
+            config.hop_length,
             kernel_size=3,
-            padding=1, 
+            padding=1,
             bias=False
         )
-        self.conv1d.weight.data = torch.ones_like(self.conv1d.weight.data)
-    
+        # ones-init suits the raw-spectrogram conv, but is pathological after GroupNorm
+        # (zero-mean input -> a ones-sum starts at ~0); keep default init when normalising.
+        if not normalize:
+            self.conv1d.weight.data = torch.ones_like(self.conv1d.weight.data)
+
     def auto_resize(self, x:torch.Tensor) -> torch.Tensor:
         """Automatically pad or cut the frequency-axis to meet the dimensions of the inverter"""
         #resize frequency axis
@@ -284,16 +297,69 @@ class Decoder1d(nn.Module):
     def forward(self, x:torch.Tensor, eps:float=1e-5) -> torch.Tensor:
         """(B,C,F,T) -> (B, L)"""
         x = self.auto_resize(x)
+        x = self.norm(x)
         x = self.conv1d(x).transpose(1,2)
         x = x.flatten(1)
         return x
 
 
 
+class ISTFTDecoder(nn.Module):
+    """ iSTFTNet-style translator decoder: sinc-spectrogram -> linear STFT -> exact iSTFT -> waveform
+
+        Instead of regressing the waveform directly (like Decoder1d), a thin conv re-grids the
+        (warped) sinc bins into a *linear* STFT (real/imag) per frame, and torch.istft performs the
+        phase-coherent overlap-add exactly. The learned part only has to learn the spectral
+        re-gridding; the hard inversion is offloaded to an exact operator.
+        Reference: iSTFTNet [Arxiv](https://arxiv.org/abs/2203.02395)
+    """
+    def __init__(self, config:ModelArgs, n_fft:int|None=None, win_length:int|None=None,
+                 normalize_input:bool=True):
+        super().__init__()
+        self.config = config
+        self.factor = 2 if config.component == "complex" else 1
+        self.hop_length = config.hop_length
+        self.n_fft = n_fft if n_fft is not None else 2 * config.n_bins
+        self.win_length = win_length if win_length is not None else self.n_fft
+        self.freq_bins = self.n_fft // 2 + 1
+        in_channels = self.factor * config.n_bins
+        # The (warped, L1-normalised) sinc spectrogram has tiny ~1e-3 magnitudes; without input
+        # normalisation the conv gets starved gradients and converges very slowly. A freq-axis
+        # GroupNorm (2 groups = real/imag) fixes the scale and lets the decoder train fast.
+        self.norm = nn.GroupNorm(num_groups=2, num_channels=in_channels) if normalize_input else nn.Identity()
+        # change the role of the conv: predict STFT real|imag instead of raw samples
+        self.conv1d = nn.Conv1d(in_channels, 2 * self.freq_bins, kernel_size=3, padding=1)
+        self.register_buffer("window", torch.hann_window(self.win_length))
+
+    def auto_resize(self, x:torch.Tensor) -> torch.Tensor:
+        """Pad or cut the frequency axis to n_bins, then flatten (B,C,F,T) -> (B, C*n_bins, T)"""
+        _, _, n_bins, _ = x.shape
+        target_bins = self.config.n_bins
+        if n_bins > target_bins:
+            x = x[:, :, :target_bins]
+        elif n_bins < target_bins:
+            x = F.pad(x, (0, 0, 0, target_bins - n_bins), mode="constant", value=0)
+        return x.flatten(1, 2)
+
+    def forward(self, x:torch.Tensor, length:int|None=None) -> torch.Tensor:
+        """(B,C,F,T) -> (B, L) via a predicted linear STFT and an exact iSTFT"""
+        x = self.auto_resize(x)                       # (B, C*n_bins, T)
+        x = self.norm(x)                              # normalise the tiny sinc-spec scale
+        x = self.conv1d(x)                            # (B, 2*freq_bins, T)
+        real, imag = x.chunk(2, dim=1)                # (B, freq_bins, T) each
+        spectrum = torch.complex(real, imag)          # (B, freq_bins, T)
+        return torch.istft(
+            spectrum, self.n_fft, self.hop_length, self.win_length,
+            window=self.window, center=True, length=length
+        )
+
+
+
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
-    def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128, 
-                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False):
+    def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128,
+                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False,
+                 decoder:str="gnconv", n_fft:int|None=None):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
             fps: int: number of frequency bins in the final 2D spectrogram
@@ -303,21 +369,29 @@ class SincNet(nn.Module):
             q_bits: int : number of bits used by the spectrogram quantizer
             causal: bool : enforce or not causality on filters
             apply_sinc_envelope: bool : whether to apply the sinc envelope to the kernels or not (see section 2.1 of https://arxiv.org/pdf/1910.10400.pdf for more details)
+            decoder: str : conv -> Decoder1d (learned overlap) | gnconv -> Decoder1d + freq GroupNorm | istft -> ISTFTDecoder (predict linear STFT, exact iSTFT synthesis)
+            n_fft: int : synthesis fft size for the istft decoder (default 2*n_bins); ignored by the conv decoder
         """
         super().__init__()
         assert component in ("real", "complex")
+        assert decoder in ("conv", "gnconv", "istft")
         #NOTE: check that the number of bins is a power of 2
         assert n_bins > 0 and (n_bins & (n_bins - 1)) == 0
         #NOTE: real component is only compatible with causal kernels
         causal:bool = True if component == "real" else causal
 
         self.config = ModelArgs(
-            component=component, scale=scale, causal=causal, fps=fps, fs=fs, 
-            n_bins=n_bins, apply_sinc_envelope=apply_sinc_envelope
+            component=component, scale=scale, causal=causal, fps=fps, fs=fs,
+            n_bins=n_bins, apply_sinc_envelope=apply_sinc_envelope, decoder=decoder
         )
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config)
-        self.decoder = Decoder1d(self.config)
+        if decoder == "istft":
+            self.decoder = ISTFTDecoder(self.config, n_fft=n_fft)        # predict linear STFT -> exact iSTFT
+        elif decoder == "gnconv":
+            self.decoder = Decoder1d(self.config, normalize=True)        # conv flow + freq GroupNorm
+        else:
+            self.decoder = Decoder1d(self.config)                        # conv flow (legacy)
         self.mulaw = MuLawQuant(q_bits=q_bits)
 
     def load_pretrained_weights(self, weights_folder:str, freeze:bool=True, device:str="cpu", verbose:bool=False) -> None:
@@ -404,13 +478,17 @@ class SincNet(nn.Module):
         """Compute the sincNet spectrogram ~ (B,C,F,T)"""
         return self.encoder(x)
 
-    def decode(self, x:torch.Tensor) -> torch.Tensor:
-        """Reconstruct audio from linear sincNet spectrogram ~ (B,L)"""
+    def decode(self, x:torch.Tensor, length:int|None=None) -> torch.Tensor:
+        """Reconstruct audio from the sincNet spectrogram ~ (B,L).
+        `length` is the target waveform length (used by the istft decoder for exact sizing)."""
+        if isinstance(self.decoder, ISTFTDecoder):
+            return self.decoder(x, length=length)
         return self.decoder(x)
-    
+
     def forward(self, x:torch.Tensor) -> torch.Tensor:
+        length = x.shape[-1]
         x = self.encode(x)
-        x = self.decode(x)
+        x = self.decode(x, length=length)
         return x
 
 
