@@ -77,29 +77,24 @@ class ModelArgs:
             else None. `factor*n_bins >= hop` is global invertibility; `>= kernel_size` is per-frame.
         """
         coeffs, H, L = self.coeffs_per_frame, self.hop_length, self.kernel_size
+        tag = f"{self.n_bins}bins/{self.fps}fps/{self.scale}"
         if coeffs < H:                       # redundancy < 1 -> information is genuinely lost
             need = -(-H // self.factor)      # ceil(H / factor)
             return warnings.warn(
-                f"{self.model_id}: redundancy < 1 (factor*n_bins={coeffs} < hop={H}) -> the "
+                f"{tag}: redundancy < 1 (factor*n_bins={coeffs} < hop={H}) -> the "
                 f"transform is information-lossy. Raise n_bins to >= {need}.",
                 stacklevel=2
             )
         if coeffs < L:                       # per-frame non-invertible (per-frame guarantees lost)
             need = -(-L // self.factor)      # ceil(L / factor)
             return warnings.warn(
-                f"{self.model_id}: per-frame non-invertible (factor*n_bins={coeffs} < "
+                f"{tag}: per-frame non-invertible (factor*n_bins={coeffs} < "
                 f"kernel_size={L}). Still globally invertible, but there is no exact per-frame "
                 f"inverse and no exact projection onto another scale below this line. Set "
                 f"n_bins >= {need} (factor*n_bins >= kernel_size) or reduce the kernel coverage "
                 f"to cross it.",
                 stacklevel=2
             )
-
-    @property
-    def model_id(self) -> str:
-        causal = "causal" if self.causal else "ncausal"
-        base = f"{self.fs}fs_{self.fps}fps_{self.n_bins}bins_{self.scale}_{self.component}_{causal}"
-        return f"{base}_sinc" if self.apply_sinc_envelope else base
 
 
 
@@ -569,7 +564,6 @@ class SincNet(nn.Module):
         )
         self.decoder_type = decoder_type
         self.config.check_invertibility()
-        self.name = self.config.model_id
         self.encoder = Encoder1d(self.config)
         self.decoder = (
             FastAnalyticDecoder1d(self.config, self.encoder) if decoder_type == "fast"

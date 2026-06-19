@@ -40,4 +40,4 @@ def test_sincnet_builds_and_round_trips(scale):
     assert spec.shape[:3] == (1, 2, 32)
     rec = model.decode(spec)
     assert rec.ndim == 2 and rec.size(0) == 1
-    assert "bins_" + scale in model.name
+    assert model.config.scale == scale
