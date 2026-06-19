@@ -436,8 +436,9 @@ class FastAnalyticDecoder1d(nn.Module):
         L = x_hat.shape[-1]
 
         if L not in self._eq_cache:
-            a = self.filters.real.squeeze(1)  # (F, K)
-            b = self.filters.imag.squeeze(1)
+            # always float32: filter FFTs are constants, cache them once
+            a = self.filters.real.squeeze(1).float()  # (F, K)
+            b = self.filters.imag.squeeze(1).float()
             if self.component == "complex":
                 G = (torch.fft.rfft(a, n=L).abs() ** 2
                      + torch.fft.rfft(b, n=L).abs() ** 2).sum(dim=0)
@@ -449,9 +450,11 @@ class FastAnalyticDecoder1d(nn.Module):
             self._eq_cache[L] = self.stride / torch.clamp(G, min=floor)
 
         eq = self._eq_cache[L]
-        X = torch.fft.rfft(x_hat, n=L)
+        # cuFFT only supports power-of-2 lengths in half precision; promote to float32.
+        dt = x_hat.dtype
+        X = torch.fft.rfft(x_hat.float(), n=L)
         y = torch.fft.irfft(X * eq, n=L)
-        return y
+        return y.to(dt)
 
     def forward(self, spec: torch.Tensor, length: int | None = None) -> torch.Tensor:
         """
