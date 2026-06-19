@@ -467,34 +467,26 @@ class FastAnalyticDecoder1d(nn.Module):
         # Reuse analysis filters.
         # Shape: (F, 1, K), complex-valued buffer.
         self.register_buffer("filters", encoder.filters.detach().clone())
+        self._eq_cache: dict = {}  # {L: eq_tensor}; reset if filters change
 
     def _equalize(self, x_hat: torch.Tensor) -> torch.Tensor:
-        """
-        Approximate dual-frame correction.
-
-        Matched-filter synthesis gives roughly A.T A x.
-        The FFT equalizer approximately divides by the average transfer function
-        of A.T A.
-        """
+        """Approximate dual-frame correction: divides by the FFT-domain frame-sum power."""
         L = x_hat.shape[-1]
 
-        a = self.filters.real.squeeze(1)  # (F, K)
-        b = self.filters.imag.squeeze(1)  # (F, K)
+        if L not in self._eq_cache:
+            a = self.filters.real.squeeze(1)  # (F, K)
+            b = self.filters.imag.squeeze(1)
+            if self.component == "complex":
+                G = (torch.fft.rfft(a, n=L).abs() ** 2
+                     + torch.fft.rfft(b, n=L).abs() ** 2).sum(dim=0)
+            elif self.component == "real":
+                G = (torch.fft.rfft(a, n=L).abs() ** 2).sum(dim=0)
+            else:
+                G = (torch.fft.rfft(b, n=L).abs() ** 2).sum(dim=0)
+            floor = self.eq_eps * G.max().clamp_min(1e-12)
+            self._eq_cache[L] = self.stride / torch.clamp(G, min=floor)
 
-        if self.component == "complex":
-            Ha = torch.fft.rfft(a, n=L)
-            Hb = torch.fft.rfft(b, n=L)
-            G = (Ha.abs() ** 2 + Hb.abs() ** 2).sum(dim=0)
-        elif self.component == "real":
-            Ha = torch.fft.rfft(a, n=L)
-            G = (Ha.abs() ** 2).sum(dim=0)
-        else:
-            Hb = torch.fft.rfft(b, n=L)
-            G = (Hb.abs() ** 2).sum(dim=0)
-
-        floor = self.eq_eps * G.max().clamp_min(1e-12)
-        eq = self.stride / torch.clamp(G, min=floor)
-
+        eq = self._eq_cache[L]
         X = torch.fft.rfft(x_hat, n=L)
         y = torch.fft.irfft(X * eq, n=L)
         return y
@@ -512,53 +504,23 @@ class FastAnalyticDecoder1d(nn.Module):
         a = self.filters.real  # (F, 1, K)
         b = self.filters.imag  # (F, 1, K)
 
+        # groups=1 with C_out=1: the sum over bins happens inside cuDNN and never
+        # materialises the (B, F, L) intermediate that groups=F_bins would create.
         if self.component == "complex":
             x_real = spec[:, 0, :, :]  # (B, F, T)
             x_imag = spec[:, 1, :, :]  # (B, F, T)
 
-            out_real = F.conv_transpose1d(
-                x_real,
-                a,
-                stride=self.stride,
-                padding=0,
-                groups=F_bins,
-            )
-
-            out_imag = F.conv_transpose1d(
-                x_imag,
-                b,
-                stride=self.stride,
-                padding=0,
-                groups=F_bins,
-            )
-
-            x_hat = (out_real + out_imag).sum(dim=1)
+            out_real = F.conv_transpose1d(x_real, a, stride=self.stride, padding=0)
+            out_imag = F.conv_transpose1d(x_imag, b, stride=self.stride, padding=0)
+            x_hat = (out_real + out_imag).squeeze(1)
 
         elif self.component == "real":
             x_real = spec[:, 0, :, :]
-
-            out = F.conv_transpose1d(
-                x_real,
-                a,
-                stride=self.stride,
-                padding=0,
-                groups=F_bins,
-            )
-
-            x_hat = out.sum(dim=1)
+            x_hat = F.conv_transpose1d(x_real, a, stride=self.stride, padding=0).squeeze(1)
 
         else:
             x_imag = spec[:, 0, :, :]
-
-            out = F.conv_transpose1d(
-                x_imag,
-                b,
-                stride=self.stride,
-                padding=0,
-                groups=F_bins,
-            )
-
-            x_hat = out.sum(dim=1)
+            x_hat = F.conv_transpose1d(x_imag, b, stride=self.stride, padding=0).squeeze(1)
 
         x_hat = self._equalize(x_hat)
 
