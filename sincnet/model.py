@@ -251,6 +251,52 @@ def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causa
 
 
 
+
+def frame_inverse(encoder:nn.Module, spec:torch.Tensor, length:int, n_iter:int=64, tol:float=1e-9) -> torch.Tensor:
+    """ Training-free inverse of a linear analysis `encoder`: recover the waveform `x` of exactly
+        `length` samples by solving  min_x ||encoder(x) - spec||^2  with conjugate gradient.
+
+        `encoder` is linear, so CG converges to the exact pseudo-inverse `A^+ spec` -- no learned
+        decoder. The adjoint `A^T` is obtained for free by autograd, so only matrix-vector products
+        are needed. Exact for well-conditioned frames (linear at any n_bins, or any scale with
+        2*n_bins >= kernel_size); ill-conditioned frames (e.g. mel below that line) converge slowly.
+        The output length equals `length` by construction.
+    """
+    B = spec.shape[0]
+    device, dtype = spec.device, spec.dtype
+
+    def adjoint(residual:torch.Tensor) -> torch.Tensor:           # A^T residual -> (B, length)
+        with torch.enable_grad():
+            x0 = torch.zeros(B, length, device=device, dtype=dtype, requires_grad=True)
+            grad, = torch.autograd.grad(encoder(x0), x0, grad_outputs=residual)
+        return grad.detach()
+
+    def normal_op(v:torch.Tensor) -> torch.Tensor:                # A^T A v
+        return adjoint(encoder(v))
+
+    def bdot(a:torch.Tensor, b:torch.Tensor) -> torch.Tensor:     # per-sample inner product (B,1)
+        return (a * b).sum(dim=1, keepdim=True)
+
+    with torch.no_grad():
+        b = adjoint(spec)                                         # A^T spec
+        x = torch.zeros(B, length, device=device, dtype=dtype)
+        r = b.clone()                                             # b - A^T A . 0
+        p = r.clone()
+        rs = bdot(r, r)
+        for _ in range(n_iter):
+            Ap = normal_op(p)
+            alpha = rs / bdot(p, Ap).clamp_min(1e-30)
+            x = x + alpha * p
+            r = r - alpha * Ap
+            rs_new = bdot(r, r)
+            if float(rs_new.sqrt().max()) < tol:
+                break
+            p = r + (rs_new / rs.clamp_min(1e-30)) * p
+            rs = rs_new
+    return x
+
+
+
 class Encoder1d(nn.Module):
     def __init__(self, config:ModelArgs):
         super().__init__()
@@ -327,8 +373,9 @@ class Decoder1d(nn.Module):
             x = F.pad(x, (0,0,0,pad), mode="constant", value=0)
         return x.flatten(1,2)
 
-    def forward(self, x:torch.Tensor) -> torch.Tensor:
-        """(B,C,F,T) -> (B, L)"""
+    def forward(self, x:torch.Tensor, length:int|None=None) -> torch.Tensor:
+        """(B,C,F,T) -> (B, L). `length` is accepted for parity with AnalyticDecoder1d but the
+        learned decoder always emits n_frames * hop_length samples (it is ignored)."""
         x = self.auto_resize(x)
         x = self.conv1d(x).transpose(1,2)
         x = x.flatten(1)
@@ -336,10 +383,32 @@ class Decoder1d(nn.Module):
 
 
 
+class AnalyticDecoder1d(nn.Module):
+    """ Training-free decoder: reconstructs the waveform by inverting the encoder directly
+        (conjugate-gradient pseudo-inverse) instead of learning weights. Same call surface as
+        Decoder1d. It holds the encoder by reference, hidden from nn.Module registration (kept in a
+        tuple) so the encoder is not duplicated in the state_dict. Exact for well-conditioned frames
+        (linear at any n_bins, or any scale with 2*n_bins >= kernel_size); see `frame_inverse`.
+    """
+    def __init__(self, config:ModelArgs, encoder:nn.Module, n_iter:int=64, tol:float=1e-9):
+        super().__init__()
+        self.config = config
+        self.n_iter = n_iter
+        self.tol = tol
+        self._encoder = (encoder,) # tuple hides it from submodule registration
+
+    def forward(self, x:torch.Tensor, length:int|None=None) -> torch.Tensor:
+        """(B,C,F,T) -> (B, length); `length` defaults to n_frames * hop_length and is preserved exactly."""
+        if length is None:
+            length = x.shape[-1] * self.config.hop_length
+        return frame_inverse(self._encoder[0], x, length, n_iter=self.n_iter, tol=self.tol)
+
+
+
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
     def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128,
-                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False):
+                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False, decoder_type:str="analytical"):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
             fps: int: number of frequency bins in the final 2D spectrogram
@@ -349,9 +418,12 @@ class SincNet(nn.Module):
             q_bits: int : number of bits used by the spectrogram quantizer
             causal: bool : enforce or not causality on filters
             apply_sinc_envelope: bool : whether to apply the sinc envelope to the kernels or not (see section 2.1 of https://arxiv.org/pdf/1910.10400.pdf for more details)
+            decoder_type: str : "analytical" -> training-free exact pseudo-inverse (AnalyticDecoder1d, no weights);
+                           "learnt" -> the small learned overlap-add conv (Decoder1d). Same encode/decode API either way.
         """
         super().__init__()
         assert component in ("real", "complex")
+        assert decoder_type in ("analytical", "learnt")
         #NOTE: check that the number of bins is a power of 2
         assert n_bins > 0 and (n_bins & (n_bins - 1)) == 0
         #NOTE: real component is only compatible with causal kernels
@@ -361,14 +433,20 @@ class SincNet(nn.Module):
             component=component, scale=scale, causal=causal, fps=fps, fs=fs,
             n_bins=n_bins, apply_sinc_envelope=apply_sinc_envelope
         )
+        self.decoder_type = decoder_type
         self.config.check_invertibility()
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config)
-        self.decoder = Decoder1d(self.config)
+        self.decoder = (
+            AnalyticDecoder1d(self.config, self.encoder) if decoder_type == "analytical"
+            else Decoder1d(self.config)
+        )
         self.mulaw = MuLawQuant(q_bits=q_bits)
 
-    def load_pretrained_weights(self, weights_folder:str, freeze:bool=True, device:str="cpu", verbose:bool=False) -> None:
+    def load_pretrained_weights(self, weights_folder:str|None=None, freeze:bool=True, device:str="cpu", verbose:bool=False) -> None:
         """ Load pretrained weights for sincnet """
+        if self.decoder_type  == "analytical":
+            return self
         weights_path = os.path.join(weights_folder, f"{self.name}.ckpt")
         checkpoint = torch.load(weights_path, map_location=torch.device(device))
         if verbose:
@@ -451,14 +529,15 @@ class SincNet(nn.Module):
         """Compute the sincNet spectrogram ~ (B,C,F,T)"""
         return self.encoder(x)
 
-    def decode(self, x:torch.Tensor,) -> torch.Tensor:
-        """Reconstruct audio from the sincNet spectrogram ~ (B,L)."""
-        return self.decoder(x)
+    def decode(self, x:torch.Tensor, length:int|None=None) -> torch.Tensor:
+        """ Reconstruct audio from the sincNet spectrogram ~ (B,L) with the configured decoder.
+            `length` (target #samples) is honoured by the analytical decoder and ignored by the
+            learned one (which always emits n_frames * hop_length). """
+        return self.decoder(x, length)
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
-        x = self.encode(x)
-        x = self.decode(x)
-        return x
+        length = x.shape[-1]
+        return self.decode(self.encode(x), length=length)
 
 
 

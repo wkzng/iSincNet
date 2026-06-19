@@ -288,6 +288,7 @@ if __name__ =="__main__":
         component=args.component,
         n_bins=args.n_bins,
         causal=args.causal,
+        decoder="learnt",          # the analytical decoder has no weights to train
     )
     summary(model)
 
