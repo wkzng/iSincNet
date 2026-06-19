@@ -405,10 +405,144 @@ class AnalyticDecoder1d(nn.Module):
 
 
 
+
+class FastAnalyticDecoder1d(nn.Module):
+    """
+    Fast differentiable decoder for Encoder1d.
+
+    It applies the adjoint filterbank using conv_transpose1d, then approximately
+    inverts the frame operator with an FFT-domain equalizer.
+
+    This is not the exact finite-length pseudo-inverse, but it is cheap, stable,
+    fully differentiable, and suitable for waveform-domain training losses.
+    """
+
+    def __init__(
+        self,
+        config,
+        encoder: nn.Module,
+        eq_eps: float = 1e-2,
+    ):
+        super().__init__()
+
+        self.stride = config.hop_length
+        self.padding = config.kernel_size // 2
+        self.component = config.component
+        self.n_bins = config.n_bins
+        self.kernel_size = config.kernel_size
+        self.eq_eps = eq_eps
+
+        # Reuse analysis filters.
+        # Shape: (F, 1, K), complex-valued buffer.
+        self.register_buffer("filters", encoder.filters.detach().clone())
+
+    def _equalize(self, x_hat: torch.Tensor) -> torch.Tensor:
+        """
+        Approximate dual-frame correction.
+
+        Matched-filter synthesis gives roughly A.T A x.
+        The FFT equalizer approximately divides by the average transfer function
+        of A.T A.
+        """
+        L = x_hat.shape[-1]
+
+        a = self.filters.real.squeeze(1)  # (F, K)
+        b = self.filters.imag.squeeze(1)  # (F, K)
+
+        if self.component == "complex":
+            Ha = torch.fft.rfft(a, n=L)
+            Hb = torch.fft.rfft(b, n=L)
+            G = (Ha.abs() ** 2 + Hb.abs() ** 2).sum(dim=0)
+        elif self.component == "real":
+            Ha = torch.fft.rfft(a, n=L)
+            G = (Ha.abs() ** 2).sum(dim=0)
+        else:
+            Hb = torch.fft.rfft(b, n=L)
+            G = (Hb.abs() ** 2).sum(dim=0)
+
+        floor = self.eq_eps * G.max().clamp_min(1e-12)
+        eq = self.stride / torch.clamp(G, min=floor)
+
+        X = torch.fft.rfft(x_hat, n=L)
+        y = torch.fft.irfft(X * eq, n=L)
+        return y
+
+    def forward(self, spec: torch.Tensor, length: int | None = None) -> torch.Tensor:
+        """
+        spec:
+            complex mode: (B, 2, F, T)
+            real/imag mode: (B, 1, F, T)
+
+        returns:
+            wav: (B, L)
+        """
+        F_bins = self.n_bins
+        a = self.filters.real  # (F, 1, K)
+        b = self.filters.imag  # (F, 1, K)
+
+        if self.component == "complex":
+            x_real = spec[:, 0, :, :]  # (B, F, T)
+            x_imag = spec[:, 1, :, :]  # (B, F, T)
+
+            out_real = F.conv_transpose1d(
+                x_real,
+                a,
+                stride=self.stride,
+                padding=0,
+                groups=F_bins,
+            )
+
+            out_imag = F.conv_transpose1d(
+                x_imag,
+                b,
+                stride=self.stride,
+                padding=0,
+                groups=F_bins,
+            )
+
+            x_hat = (out_real + out_imag).sum(dim=1)
+
+        elif self.component == "real":
+            x_real = spec[:, 0, :, :]
+
+            out = F.conv_transpose1d(
+                x_real,
+                a,
+                stride=self.stride,
+                padding=0,
+                groups=F_bins,
+            )
+
+            x_hat = out.sum(dim=1)
+
+        else:
+            x_imag = spec[:, 0, :, :]
+
+            out = F.conv_transpose1d(
+                x_imag,
+                b,
+                stride=self.stride,
+                padding=0,
+                groups=F_bins,
+            )
+
+            x_hat = out.sum(dim=1)
+
+        x_hat = self._equalize(x_hat)
+
+        # The encoder reflect-pads the input by `padding` before the strided conv, so the valid
+        # reconstruction sits at [padding : padding+length] of the (padding-free) transpose output.
+        if length is None:
+            length = spec.shape[-1] * self.stride
+        x_hat = x_hat[..., self.padding : self.padding + length]
+        return x_hat
+
+
+
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
     def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128,
-                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False, decoder_type:str="analytical"):
+                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False, decoder_type:str="fast"):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
             fps: int: number of frequency bins in the final 2D spectrogram
@@ -418,12 +552,14 @@ class SincNet(nn.Module):
             q_bits: int : number of bits used by the spectrogram quantizer
             causal: bool : enforce or not causality on filters
             apply_sinc_envelope: bool : whether to apply the sinc envelope to the kernels or not (see section 2.1 of https://arxiv.org/pdf/1910.10400.pdf for more details)
-            decoder_type: str : "analytical" -> training-free exact pseudo-inverse (AnalyticDecoder1d, no weights);
-                           "learnt" -> the small learned overlap-add conv (Decoder1d). Same encode/decode API either way.
+            decoder_type: str : reconstruction decoder (all share the same encode/decode API, all length-exact):
+                "fast"   -> FastAnalyticDecoder1d: single-pass conv_transpose + 1/G equalizer, ~37 dB, differentiable, no weights (default)
+                "exact"  -> AnalyticDecoder1d: conjugate-gradient pseudo-inverse, ~120 dB, no weights, slower
+                "learnt" -> Decoder1d: small trained overlap-add conv (requires a checkpoint)
         """
         super().__init__()
         assert component in ("real", "complex")
-        assert decoder_type in ("analytical", "learnt")
+        assert decoder_type in ("fast", "exact", "learnt")
         #NOTE: check that the number of bins is a power of 2
         assert n_bins > 0 and (n_bins & (n_bins - 1)) == 0
         #NOTE: real component is only compatible with causal kernels
@@ -437,15 +573,17 @@ class SincNet(nn.Module):
         self.config.check_invertibility()
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config)
-        self.decoder = (
-            AnalyticDecoder1d(self.config, self.encoder) if decoder_type == "analytical"
-            else Decoder1d(self.config)
-        )
+        if decoder_type == "fast":
+            self.decoder = FastAnalyticDecoder1d(self.config, self.encoder)
+        elif decoder_type == "exact":
+            self.decoder = AnalyticDecoder1d(self.config, self.encoder)
+        else:
+            self.decoder = Decoder1d(self.config)
         self.mulaw = MuLawQuant(q_bits=q_bits)
 
     def load_pretrained_weights(self, weights_folder:str|None=None, freeze:bool=True, device:str="cpu", verbose:bool=False) -> None:
-        """ Load pretrained weights for sincnet """
-        if self.decoder_type  == "analytical":
+        """ Load pretrained weights for sincnet (only the "learnt" decoder has weights to load) """
+        if self.decoder_type in ("fast", "exact"):
             return self
         weights_path = os.path.join(weights_folder, f"{self.name}.ckpt")
         checkpoint = torch.load(weights_path, map_location=torch.device(device))
