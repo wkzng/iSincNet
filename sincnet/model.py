@@ -252,48 +252,76 @@ def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causa
 
 
 
-def frame_inverse(encoder:nn.Module, spec:torch.Tensor, length:int, n_iter:int=64, tol:float=1e-9) -> torch.Tensor:
-    """ Training-free inverse of a linear analysis `encoder`: recover the waveform `x` of exactly
-        `length` samples by solving  min_x ||encoder(x) - spec||^2  with conjugate gradient.
+def _cg_solve(normal_op, b:torch.Tensor, n_iter:int=64, tol:float=1e-9, eps:float=1e-30) -> torch.Tensor:
+    """Batched conjugate gradient for the SPD system  normal_op(x) = b  (absolute residual stop)."""
+    bdot = lambda a, c: (a * c).flatten(1).sum(dim=1, keepdim=True)
+    x = torch.zeros_like(b)
+    r = b.clone()                                                 # b - normal_op(0)
+    p = r.clone()
+    rs = bdot(r, r)
+    for _ in range(n_iter):
+        Ap = normal_op(p)
+        alpha = rs / bdot(p, Ap).clamp_min(eps)
+        x = x + alpha * p
+        r = r - alpha * Ap
+        rs_new = bdot(r, r)
+        if float(rs_new.sqrt().max()) < tol:
+            break
+        p = r + (rs_new / rs.clamp_min(eps)) * p
+        rs = rs_new
+    return x
 
-        `encoder` is linear, so CG converges to the exact pseudo-inverse `A^+ spec` -- no learned
-        decoder. The adjoint `A^T` is obtained for free by autograd, so only matrix-vector products
-        are needed. Exact for well-conditioned frames (linear at any n_bins, or any scale with
-        2*n_bins >= kernel_size); ill-conditioned frames (e.g. mel below that line) converge slowly.
-        The output length equals `length` by construction.
-    """
-    B = spec.shape[0]
-    device, dtype = spec.device, spec.dtype
 
-    def adjoint(residual:torch.Tensor) -> torch.Tensor:           # A^T residual -> (B, length)
+def _adjoint_op(encoder:nn.Module, B:int, length:int, device, dtype):
+    """Return A^T as a function: residual (B,C,F,T) -> (B, length), via autograd (free, exact)."""
+    def adjoint(residual:torch.Tensor) -> torch.Tensor:
         with torch.enable_grad():
             x0 = torch.zeros(B, length, device=device, dtype=dtype, requires_grad=True)
             grad, = torch.autograd.grad(encoder(x0), x0, grad_outputs=residual)
         return grad.detach()
+    return adjoint
 
-    def normal_op(v:torch.Tensor) -> torch.Tensor:                # A^T A v
-        return adjoint(encoder(v))
 
-    def bdot(a:torch.Tensor, b:torch.Tensor) -> torch.Tensor:     # per-sample inner product (B,1)
-        return (a * b).sum(dim=1, keepdim=True)
+class FrameInverseCGFunction(torch.autograd.Function):
+    """ Differentiable pseudo-inverse  x = (A^T A + reg I)^-1 A^T spec  solved by CG.
 
-    with torch.no_grad():
-        b = adjoint(spec)                                         # A^T spec
-        x = torch.zeros(B, length, device=device, dtype=dtype)
-        r = b.clone()                                             # b - A^T A . 0
-        p = r.clone()
-        rs = bdot(r, r)
-        for _ in range(n_iter):
-            Ap = normal_op(p)
-            alpha = rs / bdot(p, Ap).clamp_min(1e-30)
-            x = x + alpha * p
-            r = r - alpha * Ap
-            rs_new = bdot(r, r)
-            if float(rs_new.sqrt().max()) < tol:
-                break
-            p = r + (rs_new / rs.clamp_min(1e-30)) * p
-            rs = rs_new
-    return x
+        The CG loop is NOT recorded; the gradient uses implicit differentiation (the operator is
+        linear and symmetric, so the same normal equations give the backward):
+            x = N^-1 A^T spec ,  N = A^T A + reg I   ->   dL/dspec = A N^-1 dL/dx
+        Memory is O(1) in the number of CG iterations (no unrolling).
+    """
+    @staticmethod
+    def forward(ctx, spec, encoder, length, n_iter, tol, reg):
+        B = spec.shape[0]
+        AT = _adjoint_op(encoder, B, length, spec.device, spec.dtype)
+        normal_op = (lambda v: AT(encoder(v)) + reg * v) if reg else (lambda v: AT(encoder(v)))
+        ctx.encoder, ctx.length, ctx.n_iter, ctx.tol, ctx.reg = encoder, length, n_iter, tol, reg
+        with torch.no_grad():
+            return _cg_solve(normal_op, AT(spec), n_iter=n_iter, tol=tol)
+
+    @staticmethod
+    def backward(ctx, grad_x):
+        encoder, length, reg = ctx.encoder, ctx.length, ctx.reg
+        B = grad_x.shape[0]
+        AT = _adjoint_op(encoder, B, length, grad_x.device, grad_x.dtype)
+        normal_op = (lambda v: AT(encoder(v)) + reg * v) if reg else (lambda v: AT(encoder(v)))
+        with torch.no_grad():
+            q = _cg_solve(normal_op, grad_x.contiguous(), n_iter=ctx.n_iter, tol=ctx.tol)
+            grad_spec = encoder(q)                                # A N^-1 dL/dx
+        return grad_spec, None, None, None, None, None
+
+
+def frame_inverse(encoder:nn.Module, spec:torch.Tensor, length:int,
+                  n_iter:int=64, tol:float=1e-9, reg:float=0.0) -> torch.Tensor:
+    """ Differentiable inverse of a linear analysis `encoder`: recover the waveform of exactly
+        `length` samples by solving  min_x ||encoder(x) - spec||^2 (+ reg||x||^2)  with conjugate
+        gradient. Converges to the exact pseudo-inverse `A^+ spec` -- no learned decoder. The adjoint
+        `A^T` comes for free from autograd; the gradient is implicit (see FrameInverseCGFunction), so
+        memory is O(1) in CG iterations. Exact for well-conditioned frames (linear at any n_bins, or
+        any scale with 2*n_bins >= kernel_size); ill-conditioned ones converge slowly. `reg` is an
+        optional Tikhonov term that stabilises near-singular frames. Output length == `length`.
+    """
+    return FrameInverseCGFunction.apply(spec, encoder, length, n_iter, tol, reg)
 
 
 
@@ -385,23 +413,27 @@ class Decoder1d(nn.Module):
 
 class AnalyticDecoder1d(nn.Module):
     """ Training-free decoder: reconstructs the waveform by inverting the encoder directly
-        (conjugate-gradient pseudo-inverse) instead of learning weights. Same call surface as
-        Decoder1d. It holds the encoder by reference, hidden from nn.Module registration (kept in a
-        tuple) so the encoder is not duplicated in the state_dict. Exact for well-conditioned frames
-        (linear at any n_bins, or any scale with 2*n_bins >= kernel_size); see `frame_inverse`.
+        (conjugate-gradient pseudo-inverse) instead of learning weights. **Differentiable** via
+        implicit backward (FrameInverseCGFunction) -- usable inside waveform-domain training losses
+        (e.g. source separation), with O(1) memory in CG iterations. Same call surface as Decoder1d.
+        It holds the encoder by reference, hidden from nn.Module registration (kept in a tuple) so the
+        encoder is not duplicated in the state_dict. Exact for well-conditioned frames (linear at any
+        n_bins, or any scale with 2*n_bins >= kernel_size); `reg` is an optional Tikhonov term that
+        stabilises near-singular frames. See `frame_inverse`.
     """
-    def __init__(self, config:ModelArgs, encoder:nn.Module, n_iter:int=64, tol:float=1e-9):
+    def __init__(self, config:ModelArgs, encoder:nn.Module, n_iter:int=64, tol:float=1e-9, reg:float=0.0):
         super().__init__()
         self.config = config
         self.n_iter = n_iter
         self.tol = tol
+        self.reg = reg
         self._encoder = (encoder,) # tuple hides it from submodule registration
 
     def forward(self, x:torch.Tensor, length:int|None=None) -> torch.Tensor:
         """(B,C,F,T) -> (B, length); `length` defaults to n_frames * hop_length and is preserved exactly."""
         if length is None:
             length = x.shape[-1] * self.config.hop_length
-        return frame_inverse(self._encoder[0], x, length, n_iter=self.n_iter, tol=self.tol)
+        return frame_inverse(self._encoder[0], x, length, n_iter=self.n_iter, tol=self.tol, reg=self.reg)
 
 
 
@@ -554,7 +586,8 @@ class SincNet(nn.Module):
             apply_sinc_envelope: bool : whether to apply the sinc envelope to the kernels or not (see section 2.1 of https://arxiv.org/pdf/1910.10400.pdf for more details)
             decoder_type: str : reconstruction decoder (all share the same encode/decode API, all length-exact):
                 "fast"   -> FastAnalyticDecoder1d: single-pass conv_transpose + 1/G equalizer, ~37 dB, differentiable, no weights (default)
-                "exact"  -> AnalyticDecoder1d: conjugate-gradient pseudo-inverse, ~120 dB, no weights, slower
+                "exact"  -> AnalyticDecoder1d: conjugate-gradient pseudo-inverse, ~120 dB, no weights, slower,
+                            DIFFERENTIABLE via implicit backward (usable in training, e.g. source separation)
                 "learnt" -> Decoder1d: small trained overlap-add conv (requires a checkpoint)
         """
         super().__init__()

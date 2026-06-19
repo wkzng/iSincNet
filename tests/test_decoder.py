@@ -86,3 +86,26 @@ def test_exact_decode_batched():
     x = torch.randn(3, 4000)
     xhat = m.decode(m.encode(x), length=4000)
     assert xhat.shape == (3, 4000) and _snr(x, xhat) > 100
+
+
+def test_exact_decoder_is_differentiable_with_exact_gradient():
+    """exact decode is differentiable (for training); implicit backward is the true adjoint:
+    for the linear map x = M s, <M s, y> == <s, Mᵀ y>  (Mᵀ y is what backward returns)."""
+    torch.manual_seed(0)
+    m = _lin(decoder_type="exact")
+    s = m.encode(torch.randn(1, 4000)).requires_grad_(True)
+    x = m.decode(s, length=4000)
+    y = torch.randn_like(x)
+    (x * y).sum().backward()
+    assert s.grad is not None and torch.isfinite(s.grad).all()
+    lhs = (x * y).sum().item()
+    rhs = (s * s.grad).sum().item()
+    assert abs(lhs - rhs) / (abs(lhs) + 1e-9) < 1e-4        # adjoint identity -> gradient is exact
+
+
+def test_fast_decoder_is_also_differentiable():
+    torch.manual_seed(0)
+    m = _lin(decoder_type="fast")
+    s = m.encode(torch.randn(1, 4000)).requires_grad_(True)
+    m.decode(s, length=4000).pow(2).sum().backward()
+    assert s.grad is not None and float(s.grad.abs().sum()) > 0
