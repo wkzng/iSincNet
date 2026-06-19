@@ -1,13 +1,13 @@
 # Pretrained weights
 
-**You almost certainly don't need these.** iSincNet's default decoders are *analytical* — they invert
+**You almost certainly don't need these.** iSincNet's default decoders are *analytical*, they invert
 the encoder in closed form, with **no trained parameters**:
 
-- `decoder_type="fast"`  — single-pass, ~37 dB, differentiable
-- `decoder_type="exact"` — conjugate-gradient pseudo-inverse, ~120 dB, differentiable
+- `decoder_type="fast"`, single-pass, ~37 dB, differentiable
+- `decoder_type="exact"`, conjugate-gradient pseudo-inverse, ~120 dB, differentiable
 
 The encoder filters are deterministic too (computed from the config), so they need no checkpoint
-either. Weights are only required for `decoder_type="learnt"` — a small trained overlap-add conv
+either. Weights are only required for `decoder_type="learnt"`, a small trained overlap-add conv
 kept for legacy / comparison.
 
 ## Using the learnt decoder
