@@ -378,44 +378,11 @@ class Encoder1d(nn.Module):
     
 
 
-class Decoder1d(nn.Module):
-    def __init__(self, config:ModelArgs):
-        super().__init__()
-        self.config = config
-        self.conv1d = nn.Conv1d(
-            config.factor * config.n_bins, config.hop_length,
-            kernel_size=3, padding=1, bias=False
-        )
-        self.conv1d.weight.data = torch.ones_like(self.conv1d.weight.data)
-
-    def auto_resize(self, x:torch.Tensor) -> torch.Tensor:
-        """Automatically pad or cut the frequency-axis to meet the dimensions of the inverter"""
-        #resize frequency axis
-        _, _, n_bins, _ = x.shape
-        target_bins = self.config.n_bins
-        if n_bins > target_bins:
-            x = x[:,:,:target_bins]
-        elif n_bins < target_bins:
-            pad = target_bins - n_bins
-            #pad from (N,C,F,T) to (N,C,F+pad,T)
-            x = F.pad(x, (0,0,0,pad), mode="constant", value=0)
-        return x.flatten(1,2)
-
-    def forward(self, x:torch.Tensor, length:int|None=None) -> torch.Tensor:
-        """(B,C,F,T) -> (B, L). `length` is accepted for parity with AnalyticDecoder1d but the
-        learned decoder always emits n_frames * hop_length samples (it is ignored)."""
-        x = self.auto_resize(x)
-        x = self.conv1d(x).transpose(1,2)
-        x = x.flatten(1)
-        return x
-
-
-
 class AnalyticDecoder1d(nn.Module):
     """ Training-free decoder: reconstructs the waveform by inverting the encoder directly
         (conjugate-gradient pseudo-inverse) instead of learning weights. **Differentiable** via
         implicit backward (FrameInverseCGFunction) -- usable inside waveform-domain training losses
-        (e.g. source separation), with O(1) memory in CG iterations. Same call surface as Decoder1d.
+        (e.g. source separation), with O(1) memory in CG iterations.
         It holds the encoder by reference, hidden from nn.Module registration (kept in a tuple) so the
         encoder is not duplicated in the state_dict. Exact for well-conditioned frames (linear at any
         n_bins, or any scale with 2*n_bins >= kernel_size); `reg` is an optional Tikhonov term that
@@ -584,15 +551,13 @@ class SincNet(nn.Module):
             q_bits: int : number of bits used by the spectrogram quantizer
             causal: bool : enforce or not causality on filters
             apply_sinc_envelope: bool : whether to apply the sinc envelope to the kernels or not (see section 2.1 of https://arxiv.org/pdf/1910.10400.pdf for more details)
-            decoder_type: str : reconstruction decoder (all share the same encode/decode API, all length-exact):
-                "fast"   -> FastAnalyticDecoder1d: single-pass conv_transpose + 1/G equalizer, ~37 dB, differentiable, no weights (default)
-                "exact"  -> AnalyticDecoder1d: conjugate-gradient pseudo-inverse, ~120 dB, no weights, slower,
-                            DIFFERENTIABLE via implicit backward (usable in training, e.g. source separation)
-                "learnt" -> Decoder1d: small trained overlap-add conv (requires a checkpoint)
+            decoder_type: str : reconstruction decoder (both share the same encode/decode API, both length-exact, no weights):
+                "fast"  -> FastAnalyticDecoder1d: single-pass conv_transpose + 1/G equalizer, ~37 dB, differentiable (default)
+                "exact" -> AnalyticDecoder1d: conjugate-gradient pseudo-inverse, ~120 dB, slower, differentiable via implicit backward
         """
         super().__init__()
         assert component in ("real", "complex")
-        assert decoder_type in ("fast", "exact", "learnt")
+        assert decoder_type in ("fast", "exact")
         #NOTE: check that the number of bins is a power of 2
         assert n_bins > 0 and (n_bins & (n_bins - 1)) == 0
         #NOTE: real component is only compatible with causal kernels
@@ -606,28 +571,12 @@ class SincNet(nn.Module):
         self.config.check_invertibility()
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config)
-        if decoder_type == "fast":
-            self.decoder = FastAnalyticDecoder1d(self.config, self.encoder)
-        elif decoder_type == "exact":
-            self.decoder = AnalyticDecoder1d(self.config, self.encoder)
-        else:
-            self.decoder = Decoder1d(self.config)
+        self.decoder = (
+            FastAnalyticDecoder1d(self.config, self.encoder) if decoder_type == "fast"
+            else AnalyticDecoder1d(self.config, self.encoder)
+        )
         self.mulaw = MuLawQuant(q_bits=q_bits)
 
-    def load_pretrained_weights(self, weights_folder:str|None=None, freeze:bool=True, device:str="cpu", verbose:bool=False) -> None:
-        """ Load pretrained weights for sincnet (only the "learnt" decoder has weights to load) """
-        if self.decoder_type in ("fast", "exact"):
-            return self
-        weights_path = os.path.join(weights_folder, f"{self.name}.ckpt")
-        checkpoint = torch.load(weights_path, map_location=torch.device(device))
-        if verbose:
-            print(f"Loading SincNet:{weights_path}...")
-            print("EPOCH", checkpoint["epoch"], "// NSTEP", checkpoint["n_steps"]) 
-        self.load_state_dict(checkpoint["state_dict"], strict=True)
-        for p in self.parameters():
-            p.requires_grad = not freeze
-        return self
-    
     def plot_kernels(self, save_path:str=None) -> None:
         """Plot the sinc kernels in the time domain"""
         if save_path is not None:
@@ -649,13 +598,6 @@ class SincNet(nn.Module):
             if save_path is not None:
                 fig.savefig(os.path.join(save_path, f"kernel_{i}.png"))
 
-    def freeze_autoencoder(self) -> None:
-        """Freeze the linear filterbank autoencoder"""
-        for module in[self.encoder, self.decoder]:
-            for p in module.parameters():
-                p.requires_grad = False
-        return self
-    
     @torch.no_grad()
     def magnitude(self, spectrogram:torch.Tensor) -> torch.Tensor:
         """Compute the magnitude spectrogram ~ (B,1,F,T) on the input signal"""
