@@ -22,15 +22,7 @@ roughly 125 dB).
   <img src="docs/assets/SincNet-Filterbank.png" alt="SincNet filterbank" width="80%"/>
 </p>
 
-## Example spectrogram
-
-First 5 s of `audio/invertibility/15033000.mp3`. SincNet produces a signed, real-valued
-representation; the causal encoder keeps the filters one-sided in time.
-
-|  | Non-causal encoder | Causal encoder |
-|:------:|:-------------------:|:--------------:|
-| signed values | <img src="docs/assets/spec_noncausal_signed.jpeg" width="260"> | <img src="docs/assets/spec_causal_signed.jpeg" width="260"> |
-| abs values | <img src="docs/assets/spec_noncausal_abs.jpeg" width="260"> | <img src="docs/assets/spec_causal_abs.jpeg" width="260"> |
+Filterbank kernels, example spectrograms, and the optional sinc envelope: [docs/filters.md](docs/filters.md).
 
 ## Quick start
 
@@ -43,12 +35,15 @@ import torch
 from sincnet.model import SincNet
 
 # nothing to download: the decoder is the analytical inverse of the encoder
-model = SincNet(fs=16_000, fps=128, n_bins=256, scale="mel",
-                component="complex", causal=False, decoder_type="exact").eval()
+model = SincNet(
+  fs=16_000, fps=128, n_bins=256,
+  scale="mel",            # any scale: "lin" | "mel" | "bark" | "erb"
+  component="complex", causal=False, decoder_type="exact",
+).eval()
 
-wav = torch.randn(1, 16_000)                              # (B, T)
+wav = torch.randn(1, 16_000)                            # (B, T)
 with torch.no_grad():
-    spec  = model.encode(wav)                            # (B, 2, F, T) signed real/imag spectrogram
+    spec  = model.encode(wav)                           # (B, 2, F, T) signed real/imag spectrogram
     recon = model.decode(spec, length=wav.shape[-1])    # (B, T) exact, training-free, length-preserving
 
     # optional mu-law quantization for a compact representation:
@@ -60,22 +55,13 @@ See the [demo notebook](demo_sincnet.ipynb).
 
 ## Decoders
 
-All share the same `encode` / `decode` API, are length-exact, and need no weights (pick via `decoder_type`):
+All share the same `encode` / `decode` API and are length-exact (pick via `decoder_type`):
 
-| `decoder_type` | reconstruction | weights | differentiable |
-|:--|:--|:--:|:--:|
-| `"fast"` (default) | about 37 dB, single-pass `conv_transpose` + equalizer | none | yes |
-| `"exact"` | about 100+ dB, conjugate-gradient pseudo-inverse (implicit backward) | none | yes |
-| `"learnt"` | small trained overlap-add conv | 96k | yes |
-
-`"exact"` is differentiable with O(1) memory in its iterations, so it drops straight into an
-end-to-end objective such as a source separator. `"learnt"` is legacy; see [docs/pretrained.md](docs/pretrained.md).
-
-## Frequency scales
-
-`scale = "lin" | "mel" | "bark" | "erb"`: same machinery, different warping. The analytical decoder
-inverts any of them. Warped scales become exactly invertible once the bank is complete (see below).
-The filterbank and the optional sinc envelope are illustrated in [docs/filters.md](docs/filters.md).
+| `decoder_type`   | reconstruction                                   | weights | differentiable | remark                                                                |
+|:----------------:|:-------------------------------------------------|:-------:|:--------------:|:----------------------------------------------------------------------|
+| `fast` (default) | ~37 dB, single-pass `conv_transpose` + equalizer | none    | yes            | fast path; fine for training losses                                   |
+| `exact`          | ~100+ dB, conjugate-gradient pseudo-inverse      | none    | yes            | implicit backward, O(1) memory in iterations; for end-to-end training |
+| `learnt`         | small trained overlap-add conv                   | 96k     | yes            | legacy, needs a checkpoint ([docs/pretrained.md](docs/pretrained.md)) |
 
 ## Invertibility
 

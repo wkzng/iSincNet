@@ -1,8 +1,16 @@
-# SincNet filterbank: kernels and the sinc envelope
+# SincNet filterbank: spectrograms, kernels, and the sinc envelope
 
 The encoder is a bank of complex sinc kernels (a `cos` and a `sin` filter per bin); the spectrogram
 is the signed, real-valued response. Filters are deterministic, computed from the config, not learned.
-Example spectrograms (causal vs non-causal) are shown in the README.
+
+## Example spectrogram
+
+First 5 s of `audio/invertibility/15033000.mp3`. The causal encoder keeps the filters one-sided in time.
+
+|  | Non-causal encoder | Causal encoder |
+|:------:|:-------------------:|:--------------:|
+| signed values | <img src="assets/spec_noncausal_signed.jpeg" width="260"> | <img src="assets/spec_causal_signed.jpeg" width="260"> |
+| abs values | <img src="assets/spec_noncausal_abs.jpeg" width="260"> | <img src="assets/spec_causal_abs.jpeg" width="260"> |
 
 ## Effect of the sinc envelope
 
