@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 import os
 import librosa
+import warnings
 import numpy as np
 from dataclasses import dataclass, asdict
 from .mulaw import MuLawQuant
@@ -12,20 +13,34 @@ from .mulaw import MuLawQuant
 
 @dataclass
 class ModelArgs:
-    """ Theoreticall framework:
-            STFT imposes:  
-                n_bins = n_fft/2 + 1   -> n_fft = 2 * (n_bins - 1)
-                window_length <= n_fft -> n_fft = coverage * window_length  with coverage>=1
-                hop_lenth <= window_length -> window_length = overlap * hop_length  (often for anti-aliasing overlap>=4)
-            Geometrically: 
-                fs = FPS * hop_lenth
-            Consequence:
-                coverage * overlap * fs = 2 * FPS * (n_bins - 1)
+    """ Geometry & invertibility (filterbank framing -- NOT an STFT, so there is no n_fft and no
+        `n_bins = n_fft/2 + 1` coupling: the number of filters N and the kernel length L are
+        INDEPENDENT design choices).
 
-        Practically: we want to control the FPS reasonably well so we need FPS to be a divisor of fs
-            fs = 16000 = 2^7 * 5^3          so interesting candidates for FPS are {40, 50, 64, 80, 100, 125, 128, 160}
-            fs = 22050 = 2^1 * (3*5*7)^2    so interesting candidates for FPS are {45 49 50 63 70 75 90 98 105 126 147 150}
-            fs = 44100 = (2*3*5*7)^2        so interesting candidates for FPS are same as for 22050 and their doubles
+            Frame rate fixes the hop:            fs = FPS * H               (H = hop_length)
+            Kernel spans `coverage` hops:        L  = coverage * H + 1       (kernel_size; coverage=4)
+            Each complex bin = 2 real channels   (cos + sin); component="real"/"imag" -> factor 1.
+
+        Per frame the analysis maps an L-sample window -> factor*N real numbers (factor=2 complex).
+        There are TWO distinct thresholds (see verify in .work/feasibility_128.py):
+
+            - GLOBAL invertibility (information preserved; may need a wide overlap-add decoder):
+                  factor * N >= H   (redundancy >= 1)
+
+            - PER-FRAME invertibility (a near-per-frame decoder suffices; the exact analytic inverse
+              AND exact cross-scale projection both exist):
+                  factor * N >= L = coverage * H
+              => with factor=2:   N * FPS >= (coverage/2) * fs       (here  N * FPS >= 2 * fs)
+
+        The "2" is quadrature (real+imag). Below the per-frame line the transform is still GLOBALLY
+        invertible (factor*N >= H), but the per-frame guarantees are lost: there is no exact
+        per-frame inverse and no exact projection onto another scale (both need factor*N >= L).
+        Cross the line by raising N or shortening the kernel coverage.
+
+        Practically pick FPS dividing fs:
+            fs = 16000 = 2^7 * 5^3        -> {40, 50, 64, 80, 100, 125, 128, 160}
+            fs = 22050 = 2 * (3*5*7)^2    -> {45, 49, 50, 63, 70, 75, 90, 98, 105, 126, 147, 150}
+            fs = 44100 = (2*3*5*7)^2      -> same as 22050 and their doubles
     """
     component: str
     causal: bool
@@ -34,7 +49,6 @@ class ModelArgs:
     fps: int
     fs: int
     apply_sinc_envelope: bool = False
-    decoder: str = "conv"
 
     @property
     def args(self) -> dict:
@@ -49,15 +63,43 @@ class ModelArgs:
         return 4 * self.hop_length + 1
 
     @property
+    def factor(self) -> int:
+        """real coefficients per bin: 2 for complex (cos + sin), 1 for real/imag (quadrature factor)"""
+        return 2 if self.component == "complex" else 1
+
+    @property
+    def coeffs_per_frame(self) -> int:
+        """real numbers produced per time frame = factor * n_bins"""
+        return self.factor * self.n_bins
+
+    def check_invertibility(self) -> str | None:
+        """ Return a heads-up string if (n_bins, fps, kernel) sit below an invertibility threshold,
+            else None. `factor*n_bins >= hop` is global invertibility; `>= kernel_size` is per-frame.
+        """
+        coeffs, H, L = self.coeffs_per_frame, self.hop_length, self.kernel_size
+        if coeffs < H:                       # redundancy < 1 -> information is genuinely lost
+            need = -(-H // self.factor)      # ceil(H / factor)
+            return warnings.warn(
+                f"{self.model_id}: redundancy < 1 (factor*n_bins={coeffs} < hop={H}) -> the "
+                f"transform is information-lossy. Raise n_bins to >= {need}.",
+                stacklevel=2
+            )
+        if coeffs < L:                       # per-frame non-invertible (per-frame guarantees lost)
+            need = -(-L // self.factor)      # ceil(L / factor)
+            return warnings.warn(
+                f"{self.model_id}: per-frame non-invertible (factor*n_bins={coeffs} < "
+                f"kernel_size={L}). Still globally invertible, but there is no exact per-frame "
+                f"inverse and no exact projection onto another scale below this line. Set "
+                f"n_bins >= {need} (factor*n_bins >= kernel_size) or reduce the kernel coverage "
+                f"to cross it.",
+                stacklevel=2
+            )
+
+    @property
     def model_id(self) -> str:
         causal = "causal" if self.causal else "ncausal"
         base = f"{self.fs}fs_{self.fps}fps_{self.n_bins}bins_{self.scale}_{self.component}_{causal}"
-        if self.apply_sinc_envelope:
-            base = f"{base}_sinc"
-        #NOTE: the default conv decoder keeps the legacy name (backward-compatible with pretrained ckpts)
-        if self.decoder != "conv":
-            base = f"{base}_{self.decoder}"
-        return base
+        return f"{base}_sinc" if self.apply_sinc_envelope else base
 
 
 
@@ -73,6 +115,7 @@ def lin_freqs(fs:int, n_bins:int) -> np.ndarray:
 
     bands = np.diff(edges)
     return centers, bands
+
 
 
 def mel_freqs(fs:int, n_bins:int) -> np.ndarray:
@@ -94,18 +137,18 @@ def mel_freqs(fs:int, n_bins:int) -> np.ndarray:
     return centers, bands
 
 
-def hz_to_bark(f:np.ndarray) -> np.ndarray:
-    """Hz -> Bark using the Traunmüller (1990) formula z = 26.81*f/(1960+f) - 0.53"""
-    return 26.81 * f / (1960.0 + f) - 0.53
-
-
-def bark_to_hz(z:np.ndarray) -> np.ndarray:
-    """Bark -> Hz, inverse of the Traunmüller (1990) formula f = 1960*(z+0.53)/(26.28-z)"""
-    return 1960.0 * (z + 0.53) / (26.28 - z)
-
 
 def bark_freqs(fs:int, n_bins:int) -> np.ndarray:
     """The transform function is BARK (critical-band rate, Traunmüller 1990)"""
+
+    def hz_to_bark(f:np.ndarray) -> np.ndarray:
+        """Hz -> Bark using the Traunmüller (1990) formula z = 26.81*f/(1960+f) - 0.53"""
+        return 26.81 * f / (1960.0 + f) - 0.53
+
+    def bark_to_hz(z:np.ndarray) -> np.ndarray:
+        """Bark -> Hz, inverse of the Traunmüller (1990) formula f = 1960*(z+0.53)/(26.28-z)"""
+        return 1960.0 * (z + 0.53) / (26.28 - z)
+
     fmin = 0
     fmax = fs // 2
 
@@ -123,18 +166,18 @@ def bark_freqs(fs:int, n_bins:int) -> np.ndarray:
     return centers, bands
 
 
-def hz_to_erb(f:np.ndarray) -> np.ndarray:
-    """Hz -> ERB-rate (Glasberg & Moore 1990) E = 21.4*log10(1 + 0.00437*f)"""
-    return 21.4 * np.log10(1.0 + 0.00437 * f)
-
-
-def erb_to_hz(e:np.ndarray) -> np.ndarray:
-    """ERB-rate -> Hz, inverse of the Glasberg & Moore (1990) formula f = (10^(E/21.4) - 1)/0.00437"""
-    return (np.power(10.0, e / 21.4) - 1.0) / 0.00437
-
 
 def erb_freqs(fs:int, n_bins:int) -> np.ndarray:
     """The transform function is ERB (equivalent rectangular bandwidth rate, Glasberg & Moore 1990)"""
+    
+    def hz_to_erb(f:np.ndarray) -> np.ndarray:
+        """Hz -> ERB-rate (Glasberg & Moore 1990) E = 21.4*log10(1 + 0.00437*f)"""
+        return 21.4 * np.log10(1.0 + 0.00437 * f)
+
+    def erb_to_hz(e:np.ndarray) -> np.ndarray:
+        """ERB-rate -> Hz, inverse of the Glasberg & Moore (1990) formula f = (10^(E/21.4) - 1)/0.00437"""
+        return (np.power(10.0, e / 21.4) - 1.0) / 0.00437
+    
     fmin = 0
     fmax = fs // 2
 
@@ -150,6 +193,7 @@ def erb_freqs(fs:int, n_bins:int) -> np.ndarray:
 
     bands = np.diff(edges)
     return centers, bands
+
 
 
 def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causal:bool, apply_sinc_envelope:bool=False) -> torch.Tensor:
@@ -261,25 +305,14 @@ class Encoder1d(nn.Module):
 
 
 class Decoder1d(nn.Module):
-    def __init__(self, config:ModelArgs, normalize:bool=False):
+    def __init__(self, config:ModelArgs):
         super().__init__()
         self.config = config
-        self.factor = 2 if config.component == "complex" else 1
-        in_channels = self.factor * config.n_bins
-        # Optional freq-axis GroupNorm (2 groups = real/imag blocks). The warped sinc spectrogram
-        # has tiny ~1e-3 magnitudes; normalising the input lets the conv train far faster/higher.
-        self.norm = nn.GroupNorm(num_groups=2, num_channels=in_channels) if normalize else nn.Identity()
         self.conv1d = nn.Conv1d(
-            in_channels,
-            config.hop_length,
-            kernel_size=3,
-            padding=1,
-            bias=False
+            config.factor * config.n_bins, config.hop_length,
+            kernel_size=3, padding=1, bias=False
         )
-        # ones-init suits the raw-spectrogram conv, but is pathological after GroupNorm
-        # (zero-mean input -> a ones-sum starts at ~0); keep default init when normalising.
-        if not normalize:
-            self.conv1d.weight.data = torch.ones_like(self.conv1d.weight.data)
+        self.conv1d.weight.data = torch.ones_like(self.conv1d.weight.data)
 
     def auto_resize(self, x:torch.Tensor) -> torch.Tensor:
         """Automatically pad or cut the frequency-axis to meet the dimensions of the inverter"""
@@ -294,72 +327,19 @@ class Decoder1d(nn.Module):
             x = F.pad(x, (0,0,0,pad), mode="constant", value=0)
         return x.flatten(1,2)
 
-    def forward(self, x:torch.Tensor, eps:float=1e-5) -> torch.Tensor:
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
         """(B,C,F,T) -> (B, L)"""
         x = self.auto_resize(x)
-        x = self.norm(x)
         x = self.conv1d(x).transpose(1,2)
         x = x.flatten(1)
         return x
 
 
 
-class ISTFTDecoder(nn.Module):
-    """ iSTFTNet-style translator decoder: sinc-spectrogram -> linear STFT -> exact iSTFT -> waveform
-
-        Instead of regressing the waveform directly (like Decoder1d), a thin conv re-grids the
-        (warped) sinc bins into a *linear* STFT (real/imag) per frame, and torch.istft performs the
-        phase-coherent overlap-add exactly. The learned part only has to learn the spectral
-        re-gridding; the hard inversion is offloaded to an exact operator.
-        Reference: iSTFTNet [Arxiv](https://arxiv.org/abs/2203.02395)
-    """
-    def __init__(self, config:ModelArgs, n_fft:int|None=None, win_length:int|None=None,
-                 normalize_input:bool=True):
-        super().__init__()
-        self.config = config
-        self.factor = 2 if config.component == "complex" else 1
-        self.hop_length = config.hop_length
-        self.n_fft = n_fft if n_fft is not None else 2 * config.n_bins
-        self.win_length = win_length if win_length is not None else self.n_fft
-        self.freq_bins = self.n_fft // 2 + 1
-        in_channels = self.factor * config.n_bins
-        # The (warped, L1-normalised) sinc spectrogram has tiny ~1e-3 magnitudes; without input
-        # normalisation the conv gets starved gradients and converges very slowly. A freq-axis
-        # GroupNorm (2 groups = real/imag) fixes the scale and lets the decoder train fast.
-        self.norm = nn.GroupNorm(num_groups=2, num_channels=in_channels) if normalize_input else nn.Identity()
-        # change the role of the conv: predict STFT real|imag instead of raw samples
-        self.conv1d = nn.Conv1d(in_channels, 2 * self.freq_bins, kernel_size=3, padding=1)
-        self.register_buffer("window", torch.hann_window(self.win_length))
-
-    def auto_resize(self, x:torch.Tensor) -> torch.Tensor:
-        """Pad or cut the frequency axis to n_bins, then flatten (B,C,F,T) -> (B, C*n_bins, T)"""
-        _, _, n_bins, _ = x.shape
-        target_bins = self.config.n_bins
-        if n_bins > target_bins:
-            x = x[:, :, :target_bins]
-        elif n_bins < target_bins:
-            x = F.pad(x, (0, 0, 0, target_bins - n_bins), mode="constant", value=0)
-        return x.flatten(1, 2)
-
-    def forward(self, x:torch.Tensor, length:int|None=None) -> torch.Tensor:
-        """(B,C,F,T) -> (B, L) via a predicted linear STFT and an exact iSTFT"""
-        x = self.auto_resize(x)                       # (B, C*n_bins, T)
-        x = self.norm(x)                              # normalise the tiny sinc-spec scale
-        x = self.conv1d(x)                            # (B, 2*freq_bins, T)
-        real, imag = x.chunk(2, dim=1)                # (B, freq_bins, T) each
-        spectrum = torch.complex(real, imag)          # (B, freq_bins, T)
-        return torch.istft(
-            spectrum, self.n_fft, self.hop_length, self.win_length,
-            window=self.window, center=True, length=length
-        )
-
-
-
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
     def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128,
-                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False,
-                 decoder:str="gnconv", n_fft:int|None=None):
+                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
             fps: int: number of frequency bins in the final 2D spectrogram
@@ -369,12 +349,9 @@ class SincNet(nn.Module):
             q_bits: int : number of bits used by the spectrogram quantizer
             causal: bool : enforce or not causality on filters
             apply_sinc_envelope: bool : whether to apply the sinc envelope to the kernels or not (see section 2.1 of https://arxiv.org/pdf/1910.10400.pdf for more details)
-            decoder: str : conv -> Decoder1d (learned overlap) | gnconv -> Decoder1d + freq GroupNorm | istft -> ISTFTDecoder (predict linear STFT, exact iSTFT synthesis)
-            n_fft: int : synthesis fft size for the istft decoder (default 2*n_bins); ignored by the conv decoder
         """
         super().__init__()
         assert component in ("real", "complex")
-        assert decoder in ("conv", "gnconv", "istft")
         #NOTE: check that the number of bins is a power of 2
         assert n_bins > 0 and (n_bins & (n_bins - 1)) == 0
         #NOTE: real component is only compatible with causal kernels
@@ -382,16 +359,12 @@ class SincNet(nn.Module):
 
         self.config = ModelArgs(
             component=component, scale=scale, causal=causal, fps=fps, fs=fs,
-            n_bins=n_bins, apply_sinc_envelope=apply_sinc_envelope, decoder=decoder
+            n_bins=n_bins, apply_sinc_envelope=apply_sinc_envelope
         )
+        self.config.check_invertibility()
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config)
-        if decoder == "istft":
-            self.decoder = ISTFTDecoder(self.config, n_fft=n_fft)        # predict linear STFT -> exact iSTFT
-        elif decoder == "gnconv":
-            self.decoder = Decoder1d(self.config, normalize=True)        # conv flow + freq GroupNorm
-        else:
-            self.decoder = Decoder1d(self.config)                        # conv flow (legacy)
+        self.decoder = Decoder1d(self.config)
         self.mulaw = MuLawQuant(q_bits=q_bits)
 
     def load_pretrained_weights(self, weights_folder:str, freeze:bool=True, device:str="cpu", verbose:bool=False) -> None:
@@ -478,17 +451,13 @@ class SincNet(nn.Module):
         """Compute the sincNet spectrogram ~ (B,C,F,T)"""
         return self.encoder(x)
 
-    def decode(self, x:torch.Tensor, length:int|None=None) -> torch.Tensor:
-        """Reconstruct audio from the sincNet spectrogram ~ (B,L).
-        `length` is the target waveform length (used by the istft decoder for exact sizing)."""
-        if isinstance(self.decoder, ISTFTDecoder):
-            return self.decoder(x, length=length)
+    def decode(self, x:torch.Tensor,) -> torch.Tensor:
+        """Reconstruct audio from the sincNet spectrogram ~ (B,L)."""
         return self.decoder(x)
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
-        length = x.shape[-1]
         x = self.encode(x)
-        x = self.decode(x, length=length)
+        x = self.decode(x)
         return x
 
 
@@ -506,11 +475,11 @@ if __name__ == '__main__':
     x, sr = librosa.load(audio_file_path, sr=sr, offset=0, duration=1)
     x = torch.tensor(x).unsqueeze(0)
     print("Audio file tensor shape", x.shape)
-
+    #x = torch.rand(1, 16000)
     
     component = "complex"
     for scale in ["lin", "mel", "bark", "erb"]:
-        sinc = SincNet(fs=sr, fps=128, component=component, scale=scale, causal=False, n_bins=256, apply_sinc_envelope=False)
+        sinc = SincNet(fs=sr, fps=128, component=component, scale=scale, causal=False, n_bins=128, apply_sinc_envelope=False)
         #sinc.plot_kernels(save_path="kernels/")
 
         scalogram = sinc.encode(x.unsqueeze(0))

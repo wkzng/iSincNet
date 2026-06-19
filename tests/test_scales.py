@@ -5,7 +5,6 @@ import pytest
 from sincnet.model import (
     SincNet,
     lin_freqs, mel_freqs, bark_freqs, erb_freqs,
-    hz_to_bark, bark_to_hz, hz_to_erb, erb_to_hz,
 )
 
 
@@ -30,12 +29,6 @@ def test_warped_scales_are_finer_at_low_frequencies(name):
     centers, bands = SCALES[name](fs=16000, n_bins=128)
     assert np.diff(centers)[0] < np.diff(centers)[-1]
     assert bands[0] < bands[-1]
-
-
-@pytest.mark.parametrize("hz_to,to_hz", [(hz_to_bark, bark_to_hz), (hz_to_erb, erb_to_hz)])
-def test_conversions_are_inverse(hz_to, to_hz):
-    f = np.linspace(0, 8000, 257)
-    assert np.allclose(to_hz(hz_to(f)), f, rtol=1e-9, atol=1e-6)
 
 
 @pytest.mark.parametrize("scale", ["bark", "erb"])

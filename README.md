@@ -144,6 +144,29 @@ with torch.no_grad():
 ```
 
 
+## Invertibility constraint
+
+Whether `decode(encode(x))` can be exact is fixed before any training by the number of filters
+`N`, the frame rate `FPS`, and the kernel length `L`. Two thresholds matter: the transform is
+**globally invertible** once `2N ≥ H` (`H = fs/FPS`, redundancy ≥ 1), but it is **per-frame
+invertible** (a simple decoder suffices, and any other scale becomes a free closed-form projection
+of the linear bank) only once
+
+```
+2N ≥ L = coverage · H   ⇔   N · FPS ≥ (coverage/2) · fs   (coverage = 4)
+```
+
+At `fps = 128` that means `n_bins ≥ 256`. The figures below show `STFT(x)` vs
+`STFT(decode(encode(x)))` collapsing to zero difference as `N` crosses this line (128 → 256 → 512):
+
+<p align="center">
+  <img src="docs/assets/sincnet_128fps128bins.png" alt="128 bins — below the per-frame line" width="80%"/><br/>
+  <img src="docs/assets/sincnet_128fps512bins.png" alt="512 bins — well above" width="80%"/>
+</p>
+
+See **[docs/invertibility_constraint.md](docs/invertibility_constraint.md)** for the derivation
+(the `KᵀK` rank argument, where the factor of 2 comes from, and the global-vs-per-frame distinction).
+
 ## References Papers and Related Topics
 - [1] Mirco Ravanelli, Yoshua Bengio, “Speaker Recognition from raw waveform with SincNet” [Arxiv](https://arxiv.org/abs/2109.08910)
 - [2] MS-SincResNet: Joint Learning of 1D and 2D Kernels Using Multi-scale SincNet and ResNet for Music Genre Classification [Arxiv](https://arxiv.org/abs/2109.08910)
