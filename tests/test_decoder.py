@@ -1,7 +1,7 @@
 import torch
 
 from sincnet import SincNet, frame_inverse
-from sincnet.model import FastAnalyticDecoder1d, AnalyticDecoder1d, Decoder1d
+from sincnet.model import FastAnalyticDecoder1d, AnalyticDecoder1d, Decoder1d, LearnedEqualizerDecoder1d
 
 
 def _snr(a, b):
@@ -24,12 +24,14 @@ def test_decoder_type_selects_the_module():
     assert isinstance(_lin(decoder_type="fast").decoder, FastAnalyticDecoder1d)
     assert isinstance(_lin(decoder_type="exact").decoder, AnalyticDecoder1d)
     assert isinstance(_lin(decoder_type="learnt").decoder, Decoder1d)
+    assert isinstance(_lin(decoder_type="semi_learnt").decoder, LearnedEqualizerDecoder1d)
 
 
 def test_only_learnt_has_trainable_weights():
     assert sum(p.numel() for p in _lin(decoder_type="fast").decoder.parameters()) == 0
     assert sum(p.numel() for p in _lin(decoder_type="exact").decoder.parameters()) == 0
     assert any(p.requires_grad for p in _lin(decoder_type="learnt").decoder.parameters())
+    assert any(p.requires_grad for p in _lin(decoder_type="semi_learnt").decoder.parameters())
 
 
 def test_exact_decoder_not_double_registered():
@@ -69,6 +71,31 @@ def test_learnt_decode_runs_and_emits_frames_times_hop():
     m = _lin(decoder_type="learnt")
     spec = m.encode(torch.randn(1, 4000))
     assert m.decode(spec).shape[-1] == spec.shape[-1] * m.config.hop_length
+
+
+def test_semi_learnt_decode_is_decent_and_length_safe():
+    torch.manual_seed(0)
+    m = _lin(decoder_type="semi_learnt")
+    x = torch.randn(1, 4000)
+    xhat = m.decode(m.encode(x), length=4000)
+    assert xhat.shape == (1, 4000)
+    # n_bins=128 is under-conditioned (nullspace near-singularities); FIR init gives ~12 dB.
+    # Well-conditioned configs (n_bins >= 256) start at ~31 dB. Both converge toward CG quality
+    # after pretrain_on_noise().
+    assert _snr(x, xhat) > 8
+
+
+def test_semi_learnt_has_fir_taps_equal_to_kernel_size():
+    m = _lin(decoder_type="semi_learnt")
+    assert m.decoder.fir.shape == (1, 1, m.config.kernel_size)
+
+
+def test_semi_learnt_is_differentiable():
+    torch.manual_seed(0)
+    m = _lin(decoder_type="semi_learnt")
+    s = m.encode(torch.randn(1, 4000)).requires_grad_(True)
+    m.decode(s, length=4000).pow(2).sum().backward()
+    assert s.grad is not None and float(s.grad.abs().sum()) > 0
 
 
 # ---- frame_inverse core ----
