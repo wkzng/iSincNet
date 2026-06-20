@@ -467,37 +467,37 @@ class FastAnalyticDecoder1d(nn.Module):
         # Reuse analysis filters.
         # Shape: (F, 1, K), complex-valued buffer.
         self.register_buffer("filters", encoder.filters.detach().clone())
+        self._eq_cache: dict = {}  # {L_fft: eq_tensor}; keyed on next-power-of-2 of signal length
 
     def _equalize(self, x_hat: torch.Tensor) -> torch.Tensor:
-        """
-        Approximate dual-frame correction.
+        """Approximate dual-frame correction: divides by the FFT-domain frame-sum power.
 
-        Matched-filter synthesis gives roughly A.T A x.
-        The FFT equalizer approximately divides by the average transfer function
-        of A.T A.
-        """
+        Uses the next power-of-2 FFT length so cuFFT always takes the radix-2 path
+        regardless of signal length (e.g. L=16500 -> L_fft=32768 is ~4x faster than
+        Bluestein on an arbitrary length). Also promotes to float32 before rfft so
+        this works under AMP (half precision)."""
         L = x_hat.shape[-1]
+        L_fft = 1 << (L - 1).bit_length()  # next power of 2 >= L
 
-        a = self.filters.real.squeeze(1)  # (F, K)
-        b = self.filters.imag.squeeze(1)  # (F, K)
+        if L_fft not in self._eq_cache:
+            # always float32: filter FFTs are constants, computed once and cached
+            a = self.filters.real.squeeze(1).float()  # (F, K)
+            b = self.filters.imag.squeeze(1).float()
+            if self.component == "complex":
+                G = (torch.fft.rfft(a, n=L_fft).abs() ** 2
+                     + torch.fft.rfft(b, n=L_fft).abs() ** 2).sum(dim=0)
+            elif self.component == "real":
+                G = (torch.fft.rfft(a, n=L_fft).abs() ** 2).sum(dim=0)
+            else:
+                G = (torch.fft.rfft(b, n=L_fft).abs() ** 2).sum(dim=0)
+            floor = self.eq_eps * G.max().clamp_min(1e-12)
+            self._eq_cache[L_fft] = self.stride / torch.clamp(G, min=floor)
 
-        if self.component == "complex":
-            Ha = torch.fft.rfft(a, n=L)
-            Hb = torch.fft.rfft(b, n=L)
-            G = (Ha.abs() ** 2 + Hb.abs() ** 2).sum(dim=0)
-        elif self.component == "real":
-            Ha = torch.fft.rfft(a, n=L)
-            G = (Ha.abs() ** 2).sum(dim=0)
-        else:
-            Hb = torch.fft.rfft(b, n=L)
-            G = (Hb.abs() ** 2).sum(dim=0)
-
-        floor = self.eq_eps * G.max().clamp_min(1e-12)
-        eq = self.stride / torch.clamp(G, min=floor)
-
-        X = torch.fft.rfft(x_hat, n=L)
-        y = torch.fft.irfft(X * eq, n=L)
-        return y
+        eq = self._eq_cache[L_fft]
+        dt = x_hat.dtype
+        X = torch.fft.rfft(x_hat.float(), n=L_fft)
+        y = torch.fft.irfft(X * eq, n=L_fft)
+        return y[..., :L].to(dt)
 
     def forward(self, spec: torch.Tensor, length: int | None = None) -> torch.Tensor:
         """
@@ -508,57 +508,21 @@ class FastAnalyticDecoder1d(nn.Module):
         returns:
             wav: (B, L)
         """
-        F_bins = self.n_bins
-        a = self.filters.real  # (F, 1, K)
-        b = self.filters.imag  # (F, 1, K)
+        # Cast filters to spec dtype so the conv works under AMP (fp16 spec, fp32 buffer)
+        a = self.filters.real.to(spec.dtype)  # (F, 1, K)
+        b = self.filters.imag.to(spec.dtype)  # (F, 1, K)
 
+        # groups=1 with weight (F, 1, K): cuDNN sums over all F input channels and
+        # emits (B, 1, L_ola), never materialising the (B, F, L_ola) intermediate
+        # that groups=F_bins would create (which blows up memory for large F or L).
         if self.component == "complex":
-            x_real = spec[:, 0, :, :]  # (B, F, T)
-            x_imag = spec[:, 1, :, :]  # (B, F, T)
-
-            out_real = F.conv_transpose1d(
-                x_real,
-                a,
-                stride=self.stride,
-                padding=0,
-                groups=F_bins,
-            )
-
-            out_imag = F.conv_transpose1d(
-                x_imag,
-                b,
-                stride=self.stride,
-                padding=0,
-                groups=F_bins,
-            )
-
-            x_hat = (out_real + out_imag).sum(dim=1)
-
+            out_real = F.conv_transpose1d(spec[:, 0], a, stride=self.stride)
+            out_imag = F.conv_transpose1d(spec[:, 1], b, stride=self.stride)
+            x_hat = (out_real + out_imag).squeeze(1)
         elif self.component == "real":
-            x_real = spec[:, 0, :, :]
-
-            out = F.conv_transpose1d(
-                x_real,
-                a,
-                stride=self.stride,
-                padding=0,
-                groups=F_bins,
-            )
-
-            x_hat = out.sum(dim=1)
-
+            x_hat = F.conv_transpose1d(spec[:, 0], a, stride=self.stride).squeeze(1)
         else:
-            x_imag = spec[:, 0, :, :]
-
-            out = F.conv_transpose1d(
-                x_imag,
-                b,
-                stride=self.stride,
-                padding=0,
-                groups=F_bins,
-            )
-
-            x_hat = out.sum(dim=1)
+            x_hat = F.conv_transpose1d(spec[:, 0], b, stride=self.stride).squeeze(1)
 
         x_hat = self._equalize(x_hat)
 
