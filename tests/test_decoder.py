@@ -1,7 +1,7 @@
 import torch
 
 from sincnet import SincNet, frame_inverse
-from sincnet.model import FastAnalyticDecoder1d, AnalyticDecoder1d, Decoder1d, LearnedEqualizerDecoder1d
+from sincnet.model import FastAnalyticDecoder1d, AnalyticDecoder1d, Decoder1d, LearnedEqualizerDecoder1d, PerBinLearnedEqualizerDecoder1d
 
 
 def _snr(a, b):
@@ -16,8 +16,8 @@ def _lin(**kw):
 
 # ---- decoder selection ----
 
-def test_default_decoder_is_fast():
-    assert isinstance(_lin().decoder, FastAnalyticDecoder1d)
+def test_default_decoder_is_semi_learnt():
+    assert isinstance(_lin().decoder, LearnedEqualizerDecoder1d)
 
 
 def test_decoder_type_selects_the_module():
@@ -25,6 +25,7 @@ def test_decoder_type_selects_the_module():
     assert isinstance(_lin(decoder_type="exact").decoder, AnalyticDecoder1d)
     assert isinstance(_lin(decoder_type="learnt").decoder, Decoder1d)
     assert isinstance(_lin(decoder_type="semi_learnt").decoder, LearnedEqualizerDecoder1d)
+    assert isinstance(_lin(decoder_type="semi_learnt2").decoder, PerBinLearnedEqualizerDecoder1d)
 
 
 def test_only_learnt_has_trainable_weights():
@@ -32,6 +33,7 @@ def test_only_learnt_has_trainable_weights():
     assert sum(p.numel() for p in _lin(decoder_type="exact").decoder.parameters()) == 0
     assert any(p.requires_grad for p in _lin(decoder_type="learnt").decoder.parameters())
     assert any(p.requires_grad for p in _lin(decoder_type="semi_learnt").decoder.parameters())
+    assert any(p.requires_grad for p in _lin(decoder_type="semi_learnt2").decoder.parameters())
 
 
 def test_exact_decoder_not_double_registered():
@@ -93,6 +95,33 @@ def test_semi_learnt_has_fir_taps_equal_to_kernel_size():
 def test_semi_learnt_is_differentiable():
     torch.manual_seed(0)
     m = _lin(decoder_type="semi_learnt")
+    s = m.encode(torch.randn(1, 4000)).requires_grad_(True)
+    m.decode(s, length=4000).pow(2).sum().backward()
+    assert s.grad is not None and float(s.grad.abs().sum()) > 0
+
+
+def test_semi_learnt2_decode_is_decent_and_length_safe():
+    torch.manual_seed(0)
+    m = _lin(decoder_type="semi_learnt2")
+    x = torch.randn(1, 4000)
+    xhat = m.decode(m.encode(x), length=4000)
+    assert xhat.shape == (1, 4000)
+    assert _snr(x, xhat) > 8
+
+
+def test_semi_learnt2_fir_shape_is_per_bin():
+    m = _lin(decoder_type="semi_learnt2")
+    assert m.decoder.fir.shape == (m.config.n_bins, 1, m.config.kernel_size)
+
+
+def test_semi_learnt2_param_count_is_f_times_fir_len():
+    m = _lin(decoder_type="semi_learnt2")
+    assert sum(p.numel() for p in m.decoder.parameters()) == m.config.n_bins * m.config.kernel_size
+
+
+def test_semi_learnt2_is_differentiable():
+    torch.manual_seed(0)
+    m = _lin(decoder_type="semi_learnt2")
     s = m.encode(torch.randn(1, 4000)).requires_grad_(True)
     m.decode(s, length=4000).pow(2).sum().backward()
     assert s.grad is not None and float(s.grad.abs().sum()) > 0

@@ -584,6 +584,98 @@ class LearnedEqualizerDecoder1d(nn.Module):
     Trainable parameters: fir_len scalars (default = kernel_size, ~500 values).
     """
 
+    def __init__(self, config, encoder: nn.Module, fir_len: int | None = None, eq_eps: float = 1e-2,):
+        super().__init__()
+        self.stride = config.hop_length
+        self.padding = config.kernel_size // 2
+        self.component = config.component
+        self.n_bins = config.n_bins
+        self.kernel_size = config.kernel_size
+        self.eq_eps = eq_eps
+
+        if fir_len is None:
+            fir_len = config.kernel_size
+        self.fir_len = fir_len
+        self.fir_pad = fir_len // 2
+
+        self.register_buffer("filters", encoder.filters.detach().clone())
+        h_init = self._compute_init_fir(fir_len)
+        self.fir = nn.Parameter(h_init)
+
+    @torch.no_grad()
+    def _compute_init_fir(self, fir_len: int) -> torch.Tensor:
+        """ Time-domain dual of stride/G(w): the same correction that FastAnalyticDecoder1d uses,
+            but expressed as a windowed FIR so the model can refine it during training.
+        """
+        nfft = max(4096, 4 * self.kernel_size)
+        a = self.filters.real.squeeze(1).float()  # (F, K)
+        b = self.filters.imag.squeeze(1).float()
+
+        if self.component == "complex":
+            G = (torch.fft.rfft(a, n=nfft).abs() ** 2 + torch.fft.rfft(b, n=nfft).abs() ** 2).sum(0)
+        else:
+            weights = a if self.component == "real" else b
+            G = torch.fft.rfft(weights, n=nfft).abs().pow(2).sum(0)
+
+        floor = self.eq_eps * G.max().clamp_min(1e-12)
+        eq = self.stride / G.clamp(min=floor)          # (nfft//2+1,)
+
+        h_full = torch.fft.irfft(eq, n=nfft)           # (nfft,)  peak at index 0
+        h_centered = torch.roll(h_full, nfft // 2)     # roll peak to center
+        c = nfft // 2
+        h = h_centered[c - fir_len // 2 : c - fir_len // 2 + fir_len]
+        h = h * torch.hann_window(fir_len, periodic=False, device=h.device)
+        return h.reshape(1, 1, fir_len)
+
+    def _adjoint(self, spec: torch.Tensor) -> torch.Tensor:
+        """ A^T s: adjoint filterbank, no equalization. Returns (B, L_hat).
+            Uses groups=1 so cuDNN accumulates the bin-sum internally -- output is (B, 1, L_hat),
+            not (B, F, L_hat). Same math, 256x smaller intermediate.
+        """
+        a = self.filters.real  # (F, 1, K)
+        b = self.filters.imag
+        
+        if self.component == "complex":
+            v = (
+                F.conv_transpose1d(spec[:, 0], a, stride=self.stride) +
+                F.conv_transpose1d(spec[:, 1], b, stride=self.stride)
+            )
+        else:
+            weights = a if self.component == "real" else b
+            v = F.conv_transpose1d(spec[:, 0], weights, stride=self.stride)
+        return v.squeeze(1)
+
+    def forward(self, spec: torch.Tensor, length: int | None = None) -> torch.Tensor:
+        v = self._adjoint(spec)  # (B, L_hat)
+        x_hat = F.conv1d(v.unsqueeze(1), self.fir, padding=self.fir_pad).squeeze(1)
+        if length is None:
+            length = spec.shape[-1] * self.stride
+        return x_hat[..., self.padding : self.padding + length]
+
+
+class PerBinLearnedEqualizerDecoder1d(nn.Module):
+    """
+    Per-bin semi-analytical decoder.
+
+    Unlike LearnedEqualizerDecoder1d (which collapses A^T to a scalar before the learned step),
+    this keeps each bin's adjoint output alive through the learned stage:
+
+      Stage 1 (fixed):   v_f = A_f^T s_f  per bin  -- (B, F, L_hat)
+      Stage 2 (learned): u_f = conv(v_f, h_f)       -- depthwise Conv1d, (B, F, L_hat)
+      Stage 3 (fixed):   x = sum_f u_f              -- (B, L_hat)
+
+    Keeping F separate channels lets the model learn cross-bin frequency interpolation
+    in the time domain, eliminating the inter-bin aliasing stripes that the scalar
+    semi_learnt decoder cannot remove.
+
+    Initialization: H_f(w) = stride * G_f(w) / ||G(w)||^2  (per-bin Wiener filter).
+    This satisfies sum_f H_f * G_f = stride exactly at in-band frequencies -- passband
+    quality with no training. pretrain_on_noise() refines it toward CG quality.
+
+    Parameters: n_bins * fir_len  (~64K for F=128, fir_len=501; ~128K for F=256).
+    Memory: materialises a (B, F, L_hat) intermediate -- larger than semi_learnt.
+    """
+
     def __init__(
         self,
         config,
@@ -605,15 +697,20 @@ class LearnedEqualizerDecoder1d(nn.Module):
         self.fir_pad = fir_len // 2
 
         self.register_buffer("filters", encoder.filters.detach().clone())
-        self._enc = (encoder,)  # tuple, not nn.Module: keeps encoder out of state_dict
+        self._enc = (encoder,)
 
         h_init = self._compute_init_fir(fir_len)
-        self.fir = nn.Parameter(h_init)
+        self.fir = nn.Parameter(h_init)  # (F, 1, fir_len)
 
     @torch.no_grad()
     def _compute_init_fir(self, fir_len: int) -> torch.Tensor:
-        """Time-domain dual of stride/G(w): the same correction that FastAnalyticDecoder1d uses,
-        but expressed as a windowed FIR so the model can refine it during training."""
+        """Broadcast the scalar Wiener filter (stride/G) to every bin.
+
+        The per-bin Wiener H_f = stride*G_f/||G||^2 is theoretically optimal but its
+        IRFFT has a narrow-band (carrier) structure that a 501-tap window can't represent
+        accurately -- the truncation error makes initialization WORSE than the scalar case.
+        Starting all bins from the same scalar equalization gives the same SNR as semi_learnt
+        at init; training then differentiates the bins to address inter-bin aliasing."""
         nfft = max(4096, 4 * self.kernel_size)
         a = self.filters.real.squeeze(1).float()  # (F, K)
         b = self.filters.imag.squeeze(1).float()
@@ -627,35 +724,32 @@ class LearnedEqualizerDecoder1d(nn.Module):
             G = torch.fft.rfft(b, n=nfft).abs().pow(2).sum(0)
 
         floor = self.eq_eps * G.max().clamp_min(1e-12)
-        eq = self.stride / G.clamp(min=floor)          # (nfft//2+1,)
+        eq = self.stride / G.clamp(min=floor)                  # (nfft//2+1,)
 
-        h_full = torch.fft.irfft(eq, n=nfft)           # (nfft,)  peak at index 0
-        h_centered = torch.roll(h_full, nfft // 2)     # roll peak to center
+        h_full = torch.fft.irfft(eq, n=nfft)
+        h_centered = torch.roll(h_full, nfft // 2)
         c = nfft // 2
         h = h_centered[c - fir_len // 2 : c - fir_len // 2 + fir_len]
         h = h * torch.hann_window(fir_len, periodic=False, device=h.device)
-        return h.reshape(1, 1, fir_len)
+        return h.reshape(1, 1, fir_len).expand(self.n_bins, 1, fir_len).clone()
 
-    def _adjoint(self, spec: torch.Tensor) -> torch.Tensor:
-        """A^T s: adjoint filterbank, no equalization. Returns (B, L_hat).
-
-        Uses groups=1 so cuDNN accumulates the bin-sum internally -- output is (B, 1, L_hat),
-        not (B, F, L_hat). Same math, 256x smaller intermediate."""
+    def _adjoint_per_bin(self, spec: torch.Tensor) -> torch.Tensor:
+        """A_f^T s_f per bin, retaining F channels. Returns (B, F, L_hat)."""
         a = self.filters.real  # (F, 1, K)
         b = self.filters.imag
 
         if self.component == "complex":
-            v = (F.conv_transpose1d(spec[:, 0], a, stride=self.stride)
-                 + F.conv_transpose1d(spec[:, 1], b, stride=self.stride))
+            return (F.conv_transpose1d(spec[:, 0], a, stride=self.stride, groups=self.n_bins)
+                    + F.conv_transpose1d(spec[:, 1], b, stride=self.stride, groups=self.n_bins))
         elif self.component == "real":
-            v = F.conv_transpose1d(spec[:, 0], a, stride=self.stride)
+            return F.conv_transpose1d(spec[:, 0], a, stride=self.stride, groups=self.n_bins)
         else:
-            v = F.conv_transpose1d(spec[:, 0], b, stride=self.stride)
-        return v.squeeze(1)  # (B, L_hat)
+            return F.conv_transpose1d(spec[:, 0], b, stride=self.stride, groups=self.n_bins)
 
     def forward(self, spec: torch.Tensor, length: int | None = None) -> torch.Tensor:
-        v = self._adjoint(spec)                                              # (B, L_hat)
-        x_hat = F.conv1d(v.unsqueeze(1), self.fir, padding=self.fir_pad).squeeze(1)
+        v = self._adjoint_per_bin(spec)                                    # (B, F, L_hat)
+        u = F.conv1d(v, self.fir, padding=self.fir_pad, groups=self.n_bins)  # (B, F, L_hat)
+        x_hat = u.sum(dim=1)                                               # (B, L_hat)
         if length is None:
             length = spec.shape[-1] * self.stride
         return x_hat[..., self.padding : self.padding + length]
@@ -668,13 +762,8 @@ class LearnedEqualizerDecoder1d(nn.Module):
         lr: float = 1e-3,
         n_cg_iter: int = 64,
         verbose: bool = True,
-    ) -> "LearnedEqualizerDecoder1d":
-        """Pre-train the FIR on white noise using CG targets.
-
-        The CG decoder (n_cg_iter=64) provides near-exact targets; the FIR learns to
-        approximate (A^T A)^{-1} directly. ~2000 steps on CPU is enough to approach
-        CG quality. Can also be fine-tuned end-to-end alongside a downstream model.
-        """
+    ) -> "PerBinLearnedEqualizerDecoder1d":
+        """Pre-train per-bin FIR filters on white noise using CG targets."""
         enc = self._enc[0]
         device = self.filters.device
         opt = torch.optim.Adam([self.fir], lr=lr)
@@ -685,9 +774,9 @@ class LearnedEqualizerDecoder1d(nn.Module):
             with torch.no_grad():
                 spec = enc(x)
                 x_target = frame_inverse(enc, spec, length=clip_len, n_iter=n_cg_iter)
-            v = self._adjoint(spec)
-            x_hat = F.conv1d(v.unsqueeze(1), self.fir, padding=self.fir_pad).squeeze(1)
-            x_hat = x_hat[..., self.padding : self.padding + clip_len]
+            v = self._adjoint_per_bin(spec)
+            u = F.conv1d(v, self.fir, padding=self.fir_pad, groups=self.n_bins)
+            x_hat = u.sum(dim=1)[..., self.padding : self.padding + clip_len]
             loss = F.mse_loss(x_hat, x_target)
             opt.zero_grad()
             loss.backward()
@@ -704,7 +793,7 @@ class LearnedEqualizerDecoder1d(nn.Module):
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
     def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128,
-                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False, decoder_type:str="fast"):
+                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False, decoder_type:str="semi_learnt"):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
             fps: int: number of frequency bins in the final 2D spectrogram
@@ -719,12 +808,15 @@ class SincNet(nn.Module):
                 "exact"      -> AnalyticDecoder1d: conjugate-gradient pseudo-inverse, ~120 dB, no weights, slower,
                                DIFFERENTIABLE via implicit backward (usable in training, e.g. source separation)
                 "learnt"     -> Decoder1d: small trained overlap-add conv (requires a checkpoint)
-                "semi_learnt"-> LearnedEqualizerDecoder1d: analytical A^T adjoint + learned FIR (~500 params);
+                "semi_learnt" -> LearnedEqualizerDecoder1d: analytical A^T adjoint + learned FIR (~500 params);
                                starts at ~31 dB (same as fast), converges toward CG quality after pretrain_on_noise()
+                "semi_learnt2"-> PerBinLearnedEqualizerDecoder1d: per-bin adjoint kept separate + F independent FIRs
+                               (~64K params); per-bin Wiener init gives passband-exact quality; eliminates inter-bin
+                               aliasing stripes that semi_learnt cannot address
         """
         super().__init__()
         assert component in ("real", "complex")
-        assert decoder_type in ("fast", "exact", "learnt", "semi_learnt")
+        assert decoder_type in ("fast", "exact", "learnt", "semi_learnt", "semi_learnt2")
         #NOTE: check that the number of bins is a power of 2
         assert n_bins > 0 and (n_bins & (n_bins - 1)) == 0
         #NOTE: real component is only compatible with causal kernels
@@ -744,6 +836,8 @@ class SincNet(nn.Module):
             self.decoder = AnalyticDecoder1d(self.config, self.encoder)
         elif decoder_type == "semi_learnt":
             self.decoder = LearnedEqualizerDecoder1d(self.config, self.encoder)
+        elif decoder_type == "semi_learnt2":
+            self.decoder = PerBinLearnedEqualizerDecoder1d(self.config, self.encoder)
         else:
             self.decoder = Decoder1d(self.config)
         self.mulaw = MuLawQuant(q_bits=q_bits)
