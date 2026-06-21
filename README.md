@@ -22,7 +22,9 @@ roughly 125 dB).
   <img src="docs/assets/SincNet-Filterbank.png" alt="SincNet filterbank" width="80%"/>
 </p>
 
-Filterbank kernels, example spectrograms, and the optional sinc envelope: [docs/filters.md](docs/filters.md).
+Filterbank kernels and example spectrograms: [docs/filters.md](docs/filters.md). For a controlled
+comparison and an explanation of why warped banks need adaptive bandwidth, see
+[why the sinc envelope matters](docs/sinc_enveloppe.md).
 
 ## Quick start
 

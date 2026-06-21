@@ -25,3 +25,11 @@ are then modulated (causal filters shown):
 | with sinc envelope | <img src="assets/kernels/sinc/kernel_10.png" width="260"> | <img src="assets/kernels/sinc/kernel_104.png" width="260"> |
 
 At low frequencies the envelope's effect is negligible; at high frequencies it localises the filter.
+
+The envelope also controls frequency coverage: without it, warped mel/Bark/ERB centers can leave
+high-frequency gaps that appear as horizontal reconstruction stripes. See
+[Why the sinc envelope matters](sinc_enveloppe.md) for the derivation and a controlled four-way
+decoder comparison.
+
+The follow-up [locality-window experiment](effect_of_window.md) tests Hann, square-root Hann,
+Hann², Gaussian, and Kaiser windows without training.
