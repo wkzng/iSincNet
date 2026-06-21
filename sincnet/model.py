@@ -446,7 +446,7 @@ class FastAnalyticDecoder1d(nn.Module):
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
     def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128,
-                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False,
+                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=True,
                  decoder_type:str="fast", cg_iters:int=64):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal

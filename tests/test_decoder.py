@@ -146,3 +146,11 @@ def test_fast_decoder_is_also_differentiable():
     s = m.encode(torch.randn(1, 4000)).requires_grad_(True)
     m.decode(s, length=4000).pow(2).sum().backward()
     assert s.grad is not None and float(s.grad.abs().sum()) > 0
+
+
+def test_sinc_envelope_defaults_on_and_can_be_disabled():
+    default = _lin()
+    disabled = _lin(apply_sinc_envelope=False)
+    assert default.config.apply_sinc_envelope is True
+    assert disabled.config.apply_sinc_envelope is False
+    assert not torch.equal(default.encoder.filters, disabled.encoder.filters)
