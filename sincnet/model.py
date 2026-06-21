@@ -264,6 +264,8 @@ class Encoder1d(nn.Module):
         )
         filters = self.preprocess_filters(filters)
         self.register_buffer("filters", filters.unsqueeze(1))
+        if self.component == "complex":
+            self.register_buffer("filters_cat", torch.cat([self.filters.real, self.filters.imag], dim=0))
 
 
     def preprocess_filters(self, filters:torch.Tensor) -> torch.Tensor: 
@@ -290,9 +292,8 @@ class Encoder1d(nn.Module):
         wav = F.pad(wav, (self.padding, self.padding), mode="reflect")
         
         if self.component == "complex":
-            real = F.conv1d(wav, weight=self.filters.real, bias=None, stride=self.stride, padding=0)
-            imag = F.conv1d(wav, weight=self.filters.imag, bias=None, stride=self.stride, padding=0)
-            spectrogram = torch.stack([real, imag], dim=1)
+            spectrogram = F.conv1d(wav, self.filters_cat, stride=self.stride)
+            spectrogram = spectrogram.reshape(wav.shape[0], 2, self.filters.shape[0], -1)
         elif self.component == "real":
             spectrogram = F.conv1d(wav, weight=self.filters.real, bias=None, stride=self.stride, padding=0).unsqueeze(1)
         else:
