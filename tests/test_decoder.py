@@ -75,6 +75,40 @@ def test_fast_decoder_reuses_equalizer_cache():
     assert next(iter(model.decoder._eq_cache.values())) is cached
 
 
+def test_fast_decoder_cache_is_keyed_by_device():
+    model = _lin()
+    spec = model.encode(torch.randn(1, 4000))
+    model.decode(spec, length=4000)
+    cache_key = next(iter(model.decoder._eq_cache))
+    assert cache_key[1] == spec.device
+
+
+def test_fast_decoder_fused_complex_synthesis_matches_split_calls():
+    torch.manual_seed(0)
+    model = _lin()
+    spec = model.encode(torch.randn(2, 4000))
+    decoder = model.decoder
+
+    a = decoder.filters.real.to(spec.dtype)
+    b = decoder.filters.imag.to(spec.dtype)
+    split = (
+        torch.nn.functional.conv_transpose1d(spec[:, 0], a, stride=decoder.stride)
+        + torch.nn.functional.conv_transpose1d(spec[:, 1], b, stride=decoder.stride)
+    ).squeeze(1)
+    split = decoder._equalize(split)
+    split = split[..., decoder.padding : decoder.padding + 4000]
+
+    fused = decoder(spec, length=4000)
+    assert torch.allclose(fused, split, atol=1e-6, rtol=1e-5)
+
+
+def test_fast_decoder_serializes_fused_filters():
+    model = _lin()
+    keys = model.state_dict().keys()
+    assert "decoder.filters" in keys
+    assert "decoder.filters_cat" in keys
+
+
 def test_fast_decoder_accepts_half_precision_coefficients():
     model = _lin()
     spec = model.encode(torch.randn(1, 4000)).half()
