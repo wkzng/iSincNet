@@ -7,6 +7,7 @@ import librosa
 import warnings
 import numpy as np
 from dataclasses import dataclass, asdict
+from .cgdecoder import frame_pseudo_inverse
 from .mulaw import MuLawQuant
 
 
@@ -247,79 +248,6 @@ def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causa
 
 
 
-def _cg_solve(normal_op, b:torch.Tensor, n_iter:int=64, tol:float=1e-9, eps:float=1e-30) -> torch.Tensor:
-    """Batched conjugate gradient for the SPD system  normal_op(x) = b  (absolute residual stop)."""
-    bdot = lambda a, c: (a * c).flatten(1).sum(dim=1, keepdim=True)
-    x = torch.zeros_like(b)
-    r = b.clone()                                                 # b - normal_op(0)
-    p = r.clone()
-    rs = bdot(r, r)
-    for _ in range(n_iter):
-        Ap = normal_op(p)
-        alpha = rs / bdot(p, Ap).clamp_min(eps)
-        x = x + alpha * p
-        r = r - alpha * Ap
-        rs_new = bdot(r, r)
-        if float(rs_new.sqrt().max()) < tol:
-            break
-        p = r + (rs_new / rs.clamp_min(eps)) * p
-        rs = rs_new
-    return x
-
-
-def _adjoint_op(encoder:nn.Module, B:int, length:int, device, dtype):
-    """Return A^T as a function: residual (B,C,F,T) -> (B, length), via autograd (free, exact)."""
-    def adjoint(residual:torch.Tensor) -> torch.Tensor:
-        with torch.enable_grad():
-            x0 = torch.zeros(B, length, device=device, dtype=dtype, requires_grad=True)
-            grad, = torch.autograd.grad(encoder(x0), x0, grad_outputs=residual)
-        return grad.detach()
-    return adjoint
-
-
-class FrameInverseCGFunction(torch.autograd.Function):
-    """ Differentiable pseudo-inverse  x = (A^T A + reg I)^-1 A^T spec  solved by CG.
-
-        The CG loop is NOT recorded; the gradient uses implicit differentiation (the operator is
-        linear and symmetric, so the same normal equations give the backward):
-            x = N^-1 A^T spec ,  N = A^T A + reg I   ->   dL/dspec = A N^-1 dL/dx
-        Memory is O(1) in the number of CG iterations (no unrolling).
-    """
-    @staticmethod
-    def forward(ctx, spec, encoder, length, n_iter, tol, reg):
-        B = spec.shape[0]
-        AT = _adjoint_op(encoder, B, length, spec.device, spec.dtype)
-        normal_op = (lambda v: AT(encoder(v)) + reg * v) if reg else (lambda v: AT(encoder(v)))
-        ctx.encoder, ctx.length, ctx.n_iter, ctx.tol, ctx.reg = encoder, length, n_iter, tol, reg
-        with torch.no_grad():
-            return _cg_solve(normal_op, AT(spec), n_iter=n_iter, tol=tol)
-
-    @staticmethod
-    def backward(ctx, grad_x):
-        encoder, length, reg = ctx.encoder, ctx.length, ctx.reg
-        B = grad_x.shape[0]
-        AT = _adjoint_op(encoder, B, length, grad_x.device, grad_x.dtype)
-        normal_op = (lambda v: AT(encoder(v)) + reg * v) if reg else (lambda v: AT(encoder(v)))
-        with torch.no_grad():
-            q = _cg_solve(normal_op, grad_x.contiguous(), n_iter=ctx.n_iter, tol=ctx.tol)
-            grad_spec = encoder(q)                                # A N^-1 dL/dx
-        return grad_spec, None, None, None, None, None
-
-
-def frame_inverse(encoder:nn.Module, spec:torch.Tensor, length:int,
-                  n_iter:int=64, tol:float=1e-9, reg:float=0.0) -> torch.Tensor:
-    """ Differentiable inverse of a linear analysis `encoder`: recover the waveform of exactly
-        `length` samples by solving  min_x ||encoder(x) - spec||^2 (+ reg||x||^2)  with conjugate
-        gradient. Converges to the exact pseudo-inverse `A^+ spec` -- no learned decoder. The adjoint
-        `A^T` comes for free from autograd; the gradient is implicit (see FrameInverseCGFunction), so
-        memory is O(1) in CG iterations. Exact for well-conditioned frames (linear at any n_bins, or
-        any scale with 2*n_bins >= kernel_size); ill-conditioned ones converge slowly. `reg` is an
-        optional Tikhonov term that stabilises near-singular frames. Output length == `length`.
-    """
-    return FrameInverseCGFunction.apply(spec, encoder, length, n_iter, tol, reg)
-
-
-
 class Encoder1d(nn.Module):
     def __init__(self, config:ModelArgs):
         super().__init__()
@@ -336,6 +264,8 @@ class Encoder1d(nn.Module):
         )
         filters = self.preprocess_filters(filters)
         self.register_buffer("filters", filters.unsqueeze(1))
+        if self.component == "complex":
+            self.register_buffer("filters_cat", torch.cat([self.filters.real, self.filters.imag], dim=0))
 
 
     def preprocess_filters(self, filters:torch.Tensor) -> torch.Tensor: 
@@ -362,9 +292,8 @@ class Encoder1d(nn.Module):
         wav = F.pad(wav, (self.padding, self.padding), mode="reflect")
         
         if self.component == "complex":
-            real = F.conv1d(wav, weight=self.filters.real, bias=None, stride=self.stride, padding=0)
-            imag = F.conv1d(wav, weight=self.filters.imag, bias=None, stride=self.stride, padding=0)
-            spectrogram = torch.stack([real, imag], dim=1)
+            spectrogram = F.conv1d(wav, self.filters_cat, stride=self.stride)
+            spectrogram = spectrogram.reshape(wav.shape[0], 2, self.filters.shape[0], -1)
         elif self.component == "real":
             spectrogram = F.conv1d(wav, weight=self.filters.real, bias=None, stride=self.stride, padding=0).unsqueeze(1)
         else:
@@ -374,51 +303,44 @@ class Encoder1d(nn.Module):
 
 
 class AnalyticDecoder1d(nn.Module):
-    """ Training-free decoder: reconstructs the waveform by inverting the encoder directly
-        (conjugate-gradient pseudo-inverse) instead of learning weights. **Differentiable** via
-        implicit backward (FrameInverseCGFunction) -- usable inside waveform-domain training losses
-        (e.g. source separation), with O(1) memory in CG iterations.
-        It holds the encoder by reference, hidden from nn.Module registration (kept in a tuple) so the
-        encoder is not duplicated in the state_dict. Exact for well-conditioned frames (linear at any
-        n_bins, or any scale with 2*n_bins >= kernel_size); `reg` is an optional Tikhonov term that
-        stabilises near-singular frames. See `frame_inverse`.
+    """Training-free conjugate-gradient pseudo-inverse of the encoder.
+
+    The encoder is held by reference in a tuple so it is not registered twice
+    in the module hierarchy or state dict. Exact reconstruction requires an
+    injective analysis operator and enough iterations; ``reg`` optionally adds
+    Tikhonov regularization for nearly singular systems. Numerical inversion is
+    delegated to :func:`sincnet.cgdecoder.frame_pseudo_inverse`.
     """
-    def __init__(self, config:ModelArgs, encoder:nn.Module, n_iter:int=64, tol:float=1e-9, reg:float=0.0):
+
+    def __init__(self, config:ModelArgs, encoder:nn.Module, n_iter:int=64, tol:float=1e-9, reg:float=0.0) -> None:
         super().__init__()
         self.config = config
         self.n_iter = n_iter
         self.tol = tol
         self.reg = reg
-        self._encoder = (encoder,) # tuple hides it from submodule registration
+        self._encoder = (encoder,)
 
-    def forward(self, x:torch.Tensor, length:int|None=None) -> torch.Tensor:
-        """(B,C,F,T) -> (B, length); `length` defaults to n_frames * hop_length and is preserved exactly."""
+    def forward(self, spec:torch.Tensor, length:int|None=None) -> torch.Tensor:
+        """Map ``(B,C,F,T)`` coefficients to an exact-length waveform."""
         if length is None:
-            length = x.shape[-1] * self.config.hop_length
-        return frame_inverse(self._encoder[0], x, length, n_iter=self.n_iter, tol=self.tol, reg=self.reg)
+            length = spec.shape[-1] * self.config.hop_length
+        return frame_pseudo_inverse(spec, self._encoder[0], length, self.n_iter, self.tol, self.reg)
 
 
 
 
 class FastAnalyticDecoder1d(nn.Module):
+    """ Fast differentiable decoder for Encoder1d.
+
+        It applies the adjoint filterbank using conv_transpose1d, then approximately
+        inverts the frame operator with an FFT-domain equalizer.
+
+        This is not the exact finite-length pseudo-inverse, but it is cheap, stable,
+        fully differentiable, and suitable for waveform-domain training losses.
     """
-    Fast differentiable decoder for Encoder1d.
 
-    It applies the adjoint filterbank using conv_transpose1d, then approximately
-    inverts the frame operator with an FFT-domain equalizer.
-
-    This is not the exact finite-length pseudo-inverse, but it is cheap, stable,
-    fully differentiable, and suitable for waveform-domain training losses.
-    """
-
-    def __init__(
-        self,
-        config,
-        encoder: nn.Module,
-        eq_eps: float = 1e-2,
-    ):
+    def __init__(self, config, encoder:nn.Module, eq_eps:float=1e-2):
         super().__init__()
-
         self.stride = config.hop_length
         self.padding = config.kernel_size // 2
         self.component = config.component
@@ -429,98 +351,61 @@ class FastAnalyticDecoder1d(nn.Module):
         # Reuse analysis filters.
         # Shape: (F, 1, K), complex-valued buffer.
         self.register_buffer("filters", encoder.filters.detach().clone())
+        if self.component == "complex":
+            self.register_buffer("filters_cat", torch.cat([self.filters.real, self.filters.imag], dim=0))
+        self._eq_cache: dict = {}  # {(L_fft, device): eq_tensor}
 
     def _equalize(self, x_hat: torch.Tensor) -> torch.Tensor:
-        """
-        Approximate dual-frame correction.
-
-        Matched-filter synthesis gives roughly A.T A x.
-        The FFT equalizer approximately divides by the average transfer function
-        of A.T A.
+        """ Approximate dual-frame correction: divides by the FFT-domain frame-sum power.
+            Uses the next power-of-2 FFT length so cuFFT always takes the radix-2 path
+            regardless of signal length (e.g. L=16500 -> L_fft=32768 is ~4x faster than
+            Bluestein on an arbitrary length). Also promotes to float32 before rfft so
+            this works under AMP (half precision).
         """
         L = x_hat.shape[-1]
+        L_fft = 1 << (L - 1).bit_length()  # next power of 2 >= L
 
-        a = self.filters.real.squeeze(1)  # (F, K)
-        b = self.filters.imag.squeeze(1)  # (F, K)
+        cache_key = (L_fft, x_hat.device)
+        if cache_key not in self._eq_cache:
+            # always float32: filter FFTs are constants, computed once and cached
+            a = self.filters.real.squeeze(1).float()  # (F, K)
+            b = self.filters.imag.squeeze(1).float()
+            if self.component == "complex":
+                G = (torch.fft.rfft(a, n=L_fft).abs() ** 2
+                     + torch.fft.rfft(b, n=L_fft).abs() ** 2).sum(dim=0)
+            elif self.component == "real":
+                G = (torch.fft.rfft(a, n=L_fft).abs() ** 2).sum(dim=0)
+            else:
+                G = (torch.fft.rfft(b, n=L_fft).abs() ** 2).sum(dim=0)
+            floor = self.eq_eps * G.max().clamp_min(1e-12)
+            self._eq_cache[cache_key] = self.stride / torch.clamp(G, min=floor)
 
-        if self.component == "complex":
-            Ha = torch.fft.rfft(a, n=L)
-            Hb = torch.fft.rfft(b, n=L)
-            G = (Ha.abs() ** 2 + Hb.abs() ** 2).sum(dim=0)
-        elif self.component == "real":
-            Ha = torch.fft.rfft(a, n=L)
-            G = (Ha.abs() ** 2).sum(dim=0)
-        else:
-            Hb = torch.fft.rfft(b, n=L)
-            G = (Hb.abs() ** 2).sum(dim=0)
-
-        floor = self.eq_eps * G.max().clamp_min(1e-12)
-        eq = self.stride / torch.clamp(G, min=floor)
-
-        X = torch.fft.rfft(x_hat, n=L)
-        y = torch.fft.irfft(X * eq, n=L)
-        return y
+        eq = self._eq_cache[cache_key]
+        dt = x_hat.dtype
+        X = torch.fft.rfft(x_hat.float(), n=L_fft)
+        y = torch.fft.irfft(X * eq, n=L_fft)
+        return y[..., :L].to(dt)
 
     def forward(self, spec: torch.Tensor, length: int | None = None) -> torch.Tensor:
         """
-        spec:
-            complex mode: (B, 2, F, T)
-            real/imag mode: (B, 1, F, T)
+            spec:
+                complex mode: (B, 2, F, T)
+                real/imag mode: (B, 1, F, T)
 
-        returns:
-            wav: (B, L)
+            returns:
+                wav: (B, L)
         """
-        F_bins = self.n_bins
-        a = self.filters.real  # (F, 1, K)
-        b = self.filters.imag  # (F, 1, K)
-
+        # groups=1 with weight (F, 1, K): cuDNN sums over all F input channels and
+        # emits (B, 1, L_ola), never materialising the (B, F, L_ola) intermediate
+        # that groups=F_bins would create (which blows up memory for large F or L).
         if self.component == "complex":
-            x_real = spec[:, 0, :, :]  # (B, F, T)
-            x_imag = spec[:, 1, :, :]  # (B, F, T)
-
-            out_real = F.conv_transpose1d(
-                x_real,
-                a,
-                stride=self.stride,
-                padding=0,
-                groups=F_bins,
-            )
-
-            out_imag = F.conv_transpose1d(
-                x_imag,
-                b,
-                stride=self.stride,
-                padding=0,
-                groups=F_bins,
-            )
-
-            x_hat = (out_real + out_imag).sum(dim=1)
-
+            x_hat = F.conv_transpose1d(spec.flatten(1, 2), self.filters_cat.to(spec.dtype), stride=self.stride).squeeze(1)
         elif self.component == "real":
-            x_real = spec[:, 0, :, :]
-
-            out = F.conv_transpose1d(
-                x_real,
-                a,
-                stride=self.stride,
-                padding=0,
-                groups=F_bins,
-            )
-
-            x_hat = out.sum(dim=1)
-
+            a = self.filters.real.to(spec.dtype)
+            x_hat = F.conv_transpose1d(spec[:, 0], a, stride=self.stride).squeeze(1)
         else:
-            x_imag = spec[:, 0, :, :]
-
-            out = F.conv_transpose1d(
-                x_imag,
-                b,
-                stride=self.stride,
-                padding=0,
-                groups=F_bins,
-            )
-
-            x_hat = out.sum(dim=1)
+            b = self.filters.imag.to(spec.dtype)
+            x_hat = F.conv_transpose1d(spec[:, 0], b, stride=self.stride).squeeze(1)
 
         x_hat = self._equalize(x_hat)
 
@@ -536,7 +421,8 @@ class FastAnalyticDecoder1d(nn.Module):
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
     def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128,
-                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=False, decoder_type:str="fast"):
+                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=True,
+                 decoder_type:str="fast", cg_iters:int=64):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
             fps: int: number of frequency bins in the final 2D spectrogram
@@ -549,10 +435,13 @@ class SincNet(nn.Module):
             decoder_type: str : reconstruction decoder (both share the same encode/decode API, both length-exact, no weights):
                 "fast"  -> FastAnalyticDecoder1d: single-pass conv_transpose + 1/G equalizer, ~37 dB, differentiable (default)
                 "exact" -> AnalyticDecoder1d: conjugate-gradient pseudo-inverse, ~120 dB, slower, differentiable via implicit backward
+            cg_iters: int : maximum CG iterations used by the exact decoder
         """
         super().__init__()
         assert component in ("real", "complex")
         assert decoder_type in ("fast", "exact")
+        if cg_iters <= 0:
+            raise ValueError("cg_iters must be positive")
         #NOTE: check that the number of bins is a power of 2
         assert n_bins > 0 and (n_bins & (n_bins - 1)) == 0
         #NOTE: real component is only compatible with causal kernels
@@ -563,11 +452,12 @@ class SincNet(nn.Module):
             n_bins=n_bins, apply_sinc_envelope=apply_sinc_envelope
         )
         self.decoder_type = decoder_type
+        self.cg_iters = cg_iters
         self.config.check_invertibility()
         self.encoder = Encoder1d(self.config)
         self.decoder = (
             FastAnalyticDecoder1d(self.config, self.encoder) if decoder_type == "fast"
-            else AnalyticDecoder1d(self.config, self.encoder)
+            else AnalyticDecoder1d(self.config, self.encoder, n_iter=cg_iters)
         )
         self.mulaw = MuLawQuant(q_bits=q_bits)
 
