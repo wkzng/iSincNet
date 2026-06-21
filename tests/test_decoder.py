@@ -1,6 +1,6 @@
 import torch
 
-from sincnet import SincNet, frame_inverse
+from sincnet import SincNet, frame_pseudo_inverse
 from sincnet.model import FastAnalyticDecoder1d, AnalyticDecoder1d, Decoder1d
 
 
@@ -71,13 +71,19 @@ def test_learnt_decode_runs_and_emits_frames_times_hop():
     assert m.decode(spec).shape[-1] == spec.shape[-1] * m.config.hop_length
 
 
-# ---- frame_inverse core ----
-
-def test_frame_inverse_standalone():
+def test_functional_and_module_exact_inverse_are_identical():
     torch.manual_seed(0)
-    m = _lin()
-    x = torch.randn(1, 4000)
-    assert _snr(x, frame_inverse(m.encoder, m.encode(x), length=4000)) > 100
+    model = _lin()
+    waveform = torch.randn(1, 4000)
+    spec = model.encode(waveform)
+    decoder = AnalyticDecoder1d(model.config, model.encoder, n_iter=16)
+    functional = frame_pseudo_inverse(
+        spec,
+        model.encoder,
+        length=4000,
+        n_iter=16,
+    )
+    assert torch.equal(functional, decoder(spec, length=4000))
 
 
 def test_exact_decode_batched():
