@@ -89,8 +89,25 @@ def test_fast_decoder_fused_complex_synthesis_matches_split_calls():
 def test_fast_decoder_serializes_fused_filters():
     model = _lin()
     keys = model.state_dict().keys()
+    assert "encoder.filters_cat" in keys
     assert "decoder.filters" in keys
     assert "decoder.filters_cat" in keys
+
+
+def test_encoder_fused_complex_analysis_matches_split_calls():
+    torch.manual_seed(0)
+    model = _lin()
+    waveform = torch.randn(2, 4000)
+    encoder = model.encoder
+
+    padded = torch.nn.functional.pad(
+        waveform.unsqueeze(1), (encoder.padding, encoder.padding), mode="reflect"
+    )
+    real = torch.nn.functional.conv1d(padded, encoder.filters.real, stride=encoder.stride)
+    imag = torch.nn.functional.conv1d(padded, encoder.filters.imag, stride=encoder.stride)
+    split = torch.stack([real, imag], dim=1)
+
+    assert torch.equal(encoder(waveform), split)
 
 
 def test_fast_decoder_accepts_half_precision_coefficients():
