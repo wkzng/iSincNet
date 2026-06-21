@@ -455,7 +455,8 @@ class FastAnalyticDecoder1d(nn.Module):
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
     def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128,
-                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=True, decoder_type:str="fast"):
+                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=True,
+                 decoder_type:str="fast", cg_iters:int=64):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
             fps: int: number of frequency bins in the final 2D spectrogram
@@ -470,10 +471,13 @@ class SincNet(nn.Module):
                 "exact"  -> AnalyticDecoder1d: conjugate-gradient pseudo-inverse, ~120 dB, no weights, slower,
                             DIFFERENTIABLE via implicit backward (usable in training, e.g. source separation)
                 "learnt" -> Decoder1d: small trained overlap-add conv (requires a checkpoint)
+            cg_iters: int : maximum CG iterations used by the exact decoder
         """
         super().__init__()
         assert component in ("real", "complex")
         assert decoder_type in ("fast", "exact", "learnt")
+        if cg_iters <= 0:
+            raise ValueError("cg_iters must be positive")
         #NOTE: check that the number of bins is a power of 2
         assert n_bins > 0 and (n_bins & (n_bins - 1)) == 0
         #NOTE: real component is only compatible with causal kernels
@@ -484,13 +488,14 @@ class SincNet(nn.Module):
             n_bins=n_bins, apply_sinc_envelope=apply_sinc_envelope
         )
         self.decoder_type = decoder_type
+        self.cg_iters = cg_iters
         self.config.check_invertibility()
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config)
         if decoder_type == "fast":
             self.decoder = FastAnalyticDecoder1d(self.config, self.encoder)
         elif decoder_type == "exact":
-            self.decoder = AnalyticDecoder1d(self.config, self.encoder)
+            self.decoder = AnalyticDecoder1d(self.config, self.encoder, n_iter=cg_iters)
         else:
             self.decoder = Decoder1d(self.config)
         self.mulaw = MuLawQuant(q_bits=q_bits)

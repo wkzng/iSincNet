@@ -1,4 +1,5 @@
 import torch
+import pytest
 
 from sincnet import SincNet, frame_pseudo_inverse
 from sincnet.model import FastAnalyticDecoder1d, AnalyticDecoder1d, Decoder1d
@@ -24,6 +25,17 @@ def test_decoder_type_selects_the_module():
     assert isinstance(_lin(decoder_type="fast").decoder, FastAnalyticDecoder1d)
     assert isinstance(_lin(decoder_type="exact").decoder, AnalyticDecoder1d)
     assert isinstance(_lin(decoder_type="learnt").decoder, Decoder1d)
+
+
+def test_exact_decoder_iteration_configuration():
+    assert _lin(decoder_type="exact").decoder.n_iter == 64
+    assert _lin(decoder_type="exact", cg_iters=16).decoder.n_iter == 16
+
+
+@pytest.mark.parametrize("cg_iters", [0, -1])
+def test_cg_iters_must_be_positive(cg_iters):
+    with pytest.raises(ValueError, match="cg_iters must be positive"):
+        _lin(cg_iters=cg_iters)
 
 
 def test_only_learnt_has_trainable_weights():
