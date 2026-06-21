@@ -197,6 +197,15 @@ def erb_freqs(fs:int, n_bins:int) -> np.ndarray:
 
 
 
+def scale_freqs(fs:int, n_bins:int, scale:str) -> tuple[np.ndarray, np.ndarray]:
+    """Return centre frequencies and bandwidths for a supported scale."""
+    functions = {"lin": lin_freqs, "mel": mel_freqs, "bark": bark_freqs, "erb": erb_freqs}
+    if scale not in functions:
+        raise ValueError("Only lin, mel, bark, erb scales are supported for the SincNet Kernel")
+    return functions[scale](fs, n_bins)
+
+
+
 def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causal:bool, apply_sinc_envelope:bool=False) -> torch.Tensor:
     """ Compute real and imaginary part of sinc kernels
             r(x) = 2a*sinc(ax) - 2b*sinc(bx)  with x=2πt
@@ -211,16 +220,7 @@ def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causa
         Reference: Section 2.1 of  FILTERBANK DESIGN FOR END-TO-END SPEECH SEPARATION [Arxiv](https://arxiv.org/pdf/1910.10400)
     """
     #compute oscillatory frequencies (the zeroth-will be removed later)
-    if scale == "lin":
-        freq_hz, band_hz = lin_freqs(fs=fs, n_bins=n_bins)
-    elif scale == "mel":
-        freq_hz, band_hz = mel_freqs(fs=fs, n_bins=n_bins)
-    elif scale == "bark":
-        freq_hz, band_hz = bark_freqs(fs=fs, n_bins=n_bins)
-    elif scale == "erb":
-        freq_hz, band_hz = erb_freqs(fs=fs, n_bins=n_bins)
-    else:
-        raise ValueError("Only lin, mel, bark, erb scales are supported for the SincNet Kernel")
+    freq_hz, band_hz = scale_freqs(fs, n_bins, scale)
     
     #compute time intervals
     t = torch.linspace(-1/2, 1/2, steps=kernel_size).view(1,-1) * kernel_size / fs
@@ -476,8 +476,7 @@ class SincNet(nn.Module):
         super().__init__()
         assert component in ("real", "complex")
         assert decoder_type in ("fast", "exact", "learnt")
-        if cg_iters <= 0:
-            raise ValueError("cg_iters must be positive")
+        assert cg_iters > 0, "cg_iters must be positive"
         #NOTE: check that the number of bins is a power of 2
         assert n_bins > 0 and (n_bins & (n_bins - 1)) == 0
         #NOTE: real component is only compatible with causal kernels
@@ -488,7 +487,6 @@ class SincNet(nn.Module):
             n_bins=n_bins, apply_sinc_envelope=apply_sinc_envelope
         )
         self.decoder_type = decoder_type
-        self.cg_iters = cg_iters
         self.config.check_invertibility()
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config)
