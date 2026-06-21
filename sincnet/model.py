@@ -347,14 +347,7 @@ class AnalyticDecoder1d(nn.Module):
     delegated to :func:`sincnet.cgdecoder.frame_pseudo_inverse`.
     """
 
-    def __init__(
-        self,
-        config: ModelArgs,
-        encoder: nn.Module,
-        n_iter: int = 64,
-        tol: float = 1e-9,
-        reg: float = 0.0,
-    ) -> None:
+    def __init__(self, config:ModelArgs, encoder:nn.Module, n_iter:int=64, tol:float=1e-9, reg:float=0.0) -> None:
         super().__init__()
         self.config = config
         self.n_iter = n_iter
@@ -362,39 +355,25 @@ class AnalyticDecoder1d(nn.Module):
         self.reg = reg
         self._encoder = (encoder,)
 
-    def forward(self, spec: torch.Tensor, length: int | None = None) -> torch.Tensor:
+    def forward(self, spec:torch.Tensor, length:int|None=None) -> torch.Tensor:
         """Map ``(B,C,F,T)`` coefficients to an exact-length waveform."""
         if length is None:
             length = spec.shape[-1] * self.config.hop_length
-        return frame_pseudo_inverse(
-            spec=spec,
-            encoder=self._encoder[0],
-            length=length,
-            n_iter=self.n_iter,
-            tol=self.tol,
-            reg=self.reg,
-        )
+        return frame_pseudo_inverse(spec, self._encoder[0], length, self.n_iter, self.tol, self.reg)
 
 
 class FastAnalyticDecoder1d(nn.Module):
+    """ Fast differentiable decoder for Encoder1d.
+
+        It applies the adjoint filterbank using conv_transpose1d, then approximately
+        inverts the frame operator with an FFT-domain equalizer.
+
+        This is not the exact finite-length pseudo-inverse, but it is cheap, stable,
+        fully differentiable, and suitable for waveform-domain training losses.
     """
-    Fast differentiable decoder for Encoder1d.
 
-    It applies the adjoint filterbank using conv_transpose1d, then approximately
-    inverts the frame operator with an FFT-domain equalizer.
-
-    This is not the exact finite-length pseudo-inverse, but it is cheap, stable,
-    fully differentiable, and suitable for waveform-domain training losses.
-    """
-
-    def __init__(
-        self,
-        config,
-        encoder: nn.Module,
-        eq_eps: float = 1e-2,
-    ):
+    def __init__(self, config, encoder:nn.Module, eq_eps:float=1e-2):
         super().__init__()
-
         self.stride = config.hop_length
         self.padding = config.kernel_size // 2
         self.component = config.component
@@ -405,19 +384,22 @@ class FastAnalyticDecoder1d(nn.Module):
         # Reuse analysis filters.
         # Shape: (F, 1, K), complex-valued buffer.
         self.register_buffer("filters", encoder.filters.detach().clone())
-        self._eq_cache: dict = {}  # {L_fft: eq_tensor}; keyed on next-power-of-2 of signal length
+        if self.component == "complex":
+            self.register_buffer("filters_cat", torch.cat([self.filters.real, self.filters.imag], dim=0))
+        self._eq_cache: dict = {}  # {(L_fft, device): eq_tensor}
 
     def _equalize(self, x_hat: torch.Tensor) -> torch.Tensor:
-        """Approximate dual-frame correction: divides by the FFT-domain frame-sum power.
-
-        Uses the next power-of-2 FFT length so cuFFT always takes the radix-2 path
-        regardless of signal length (e.g. L=16500 -> L_fft=32768 is ~4x faster than
-        Bluestein on an arbitrary length). Also promotes to float32 before rfft so
-        this works under AMP (half precision)."""
+        """ Approximate dual-frame correction: divides by the FFT-domain frame-sum power.
+            Uses the next power-of-2 FFT length so cuFFT always takes the radix-2 path
+            regardless of signal length (e.g. L=16500 -> L_fft=32768 is ~4x faster than
+            Bluestein on an arbitrary length). Also promotes to float32 before rfft so
+            this works under AMP (half precision).
+        """
         L = x_hat.shape[-1]
         L_fft = 1 << (L - 1).bit_length()  # next power of 2 >= L
 
-        if L_fft not in self._eq_cache:
+        cache_key = (L_fft, x_hat.device)
+        if cache_key not in self._eq_cache:
             # always float32: filter FFTs are constants, computed once and cached
             a = self.filters.real.squeeze(1).float()  # (F, K)
             b = self.filters.imag.squeeze(1).float()
@@ -429,9 +411,9 @@ class FastAnalyticDecoder1d(nn.Module):
             else:
                 G = (torch.fft.rfft(b, n=L_fft).abs() ** 2).sum(dim=0)
             floor = self.eq_eps * G.max().clamp_min(1e-12)
-            self._eq_cache[L_fft] = self.stride / torch.clamp(G, min=floor)
+            self._eq_cache[cache_key] = self.stride / torch.clamp(G, min=floor)
 
-        eq = self._eq_cache[L_fft]
+        eq = self._eq_cache[cache_key]
         dt = x_hat.dtype
         X = torch.fft.rfft(x_hat.float(), n=L_fft)
         y = torch.fft.irfft(X * eq, n=L_fft)
@@ -439,27 +421,23 @@ class FastAnalyticDecoder1d(nn.Module):
 
     def forward(self, spec: torch.Tensor, length: int | None = None) -> torch.Tensor:
         """
-        spec:
-            complex mode: (B, 2, F, T)
-            real/imag mode: (B, 1, F, T)
+            spec:
+                complex mode: (B, 2, F, T)
+                real/imag mode: (B, 1, F, T)
 
-        returns:
-            wav: (B, L)
+            returns:
+                wav: (B, L)
         """
-        # Cast filters to spec dtype so the conv works under AMP (fp16 spec, fp32 buffer)
-        a = self.filters.real.to(spec.dtype)  # (F, 1, K)
-        b = self.filters.imag.to(spec.dtype)  # (F, 1, K)
-
         # groups=1 with weight (F, 1, K): cuDNN sums over all F input channels and
         # emits (B, 1, L_ola), never materialising the (B, F, L_ola) intermediate
         # that groups=F_bins would create (which blows up memory for large F or L).
         if self.component == "complex":
-            out_real = F.conv_transpose1d(spec[:, 0], a, stride=self.stride)
-            out_imag = F.conv_transpose1d(spec[:, 1], b, stride=self.stride)
-            x_hat = (out_real + out_imag).squeeze(1)
+            x_hat = F.conv_transpose1d(spec.flatten(1, 2), self.filters_cat.to(spec.dtype), stride=self.stride).squeeze(1)
         elif self.component == "real":
+            a = self.filters.real.to(spec.dtype)
             x_hat = F.conv_transpose1d(spec[:, 0], a, stride=self.stride).squeeze(1)
         else:
+            b = self.filters.imag.to(spec.dtype)
             x_hat = F.conv_transpose1d(spec[:, 0], b, stride=self.stride).squeeze(1)
 
         x_hat = self._equalize(x_hat)
