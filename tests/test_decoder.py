@@ -2,7 +2,7 @@ import torch
 
 import pytest
 
-from sincnet import SincNet, frame_inverse
+from sincnet import SincNet, frame_pseudo_inverse
 from sincnet.model import FastAnalyticDecoder1d, AnalyticDecoder1d
 
 
@@ -25,6 +25,17 @@ def test_default_decoder_is_fast():
 def test_decoder_type_selects_the_module():
     assert isinstance(_lin(decoder_type="fast").decoder, FastAnalyticDecoder1d)
     assert isinstance(_lin(decoder_type="exact").decoder, AnalyticDecoder1d)
+
+
+def test_exact_decoder_iteration_configuration():
+    assert _lin(decoder_type="exact").decoder.n_iter == 64
+    assert _lin(decoder_type="exact", cg_iters=16).decoder.n_iter == 16
+
+
+@pytest.mark.parametrize("cg_iters", [0, -1])
+def test_cg_iters_must_be_positive(cg_iters):
+    with pytest.raises(ValueError, match="cg_iters must be positive"):
+        _lin(cg_iters=cg_iters)
 
 
 def test_unknown_decoder_type_raises():
@@ -54,6 +65,24 @@ def test_fast_decode_is_decent_and_length_safe():
     assert _snr(x, xhat) > 15            # single-pass equalizer ~ tens of dB
 
 
+def test_fast_decoder_reuses_equalizer_cache():
+    model = _lin()
+    spec = model.encode(torch.randn(1, 4000))
+    model.decode(spec, length=4000)
+    assert len(model.decoder._eq_cache) == 1
+    cached = next(iter(model.decoder._eq_cache.values()))
+    model.decode(spec, length=4000)
+    assert next(iter(model.decoder._eq_cache.values())) is cached
+
+
+def test_fast_decoder_accepts_half_precision_coefficients():
+    model = _lin()
+    spec = model.encode(torch.randn(1, 4000)).half()
+    output = model.decode(spec, length=4000)
+    assert output.dtype == spec.dtype
+    assert torch.isfinite(output).all()
+
+
 def test_exact_decode_is_exact_and_length_safe():
     torch.manual_seed(0)
     m = _lin(decoder_type="exact")
@@ -70,13 +99,22 @@ def test_forward_preserves_input_length_exactly():
         assert _lin(decoder_type=dt)(x).shape == (2, 4123)
 
 
-# ---- frame_inverse core ----
+# ---- functional exact inverse ----
 
-def test_frame_inverse_standalone():
+@pytest.mark.parametrize("n_iter", [16, 64])
+def test_functional_and_module_exact_inverse_are_identical(n_iter):
     torch.manual_seed(0)
-    m = _lin()
-    x = torch.randn(1, 4000)
-    assert _snr(x, frame_inverse(m.encoder, m.encode(x), length=4000)) > 100
+    model = _lin()
+    waveform = torch.randn(1, 4000)
+    spec = model.encode(waveform)
+    decoder = AnalyticDecoder1d(model.config, model.encoder, n_iter=n_iter)
+    functional = frame_pseudo_inverse(
+        spec,
+        model.encoder,
+        length=4000,
+        n_iter=n_iter,
+    )
+    assert torch.equal(functional, decoder(spec, length=4000))
 
 
 def test_exact_decode_batched():
