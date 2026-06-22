@@ -29,7 +29,8 @@ comparison and an explanation of why warped banks need adaptive bandwidth, see
 ## Quick start
 
 ```bash
-pip install -r requirements.txt
+pip install .            # core (torch, numpy, librosa)
+pip install .[demo]      # adds matplotlib + soundfile for the demo notebook
 ```
 
 ```python
@@ -63,7 +64,6 @@ All share the same `encode` / `decode` API and are length-exact (pick via `decod
 |:----------------:|:-------------------------------------------------|:-------:|:--------------:|:----------------------------------------------------------------------|
 | `fast` (default) | ~37 dB, single-pass `conv_transpose` + equalizer | none    | yes            | fast path; fine for training losses                                   |
 | `exact`          | ~100+ dB, conjugate-gradient pseudo-inverse      | none    | yes            | implicit backward, O(1) memory in iterations; for end-to-end training |
-| `learnt`         | small trained overlap-add conv                   | 96k     | yes            | legacy, needs a checkpoint ([docs/pretrained.md](docs/pretrained.md)) |
 
 ## Invertibility
 

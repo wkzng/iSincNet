@@ -78,6 +78,12 @@ class ModelArgs:
             n_bins *= 2
         return n_bins
 
+    @property
+    def model_id(self) -> str:
+        causal = "causal" if self.causal else "ncausal"
+        base = f"{self.fs}fs_{self.fps}fps_{self.n_bins}bins_{self.scale}_{self.component}_{causal}"
+        return f"{base}_sinc" if self.apply_sinc_envelope else base
+
     def check_invertibility(self) -> str | None:
         """Warn when coefficient count or frequency coverage makes inversion unsafe."""
         coeffs, H = self.coeffs_per_frame, self.hop_length
@@ -96,12 +102,6 @@ class ModelArgs:
                 f"n_bins >= {stable_bins} for the exact decoder.",
                 stacklevel=2
             )
-
-    @property
-    def model_id(self) -> str:
-        causal = "causal" if self.causal else "ncausal"
-        base = f"{self.fs}fs_{self.fps}fps_{self.n_bins}bins_{self.scale}_{self.component}_{causal}"
-        return f"{base}_sinc" if self.apply_sinc_envelope else base
 
 
 
@@ -456,7 +456,7 @@ class FastAnalyticDecoder1d(nn.Module):
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
     def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128,
-                 q_bits:int=8, causal:bool=False, apply_sinc_envelope:bool=False,
+                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=True,
                  decoder_type:str="fast", cg_iters:int=128):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
@@ -489,6 +489,7 @@ class SincNet(nn.Module):
             n_bins=n_bins, apply_sinc_envelope=apply_sinc_envelope
         )
         self.decoder_type = decoder_type
+        self.cg_iters = cg_iters
         self.config.check_invertibility()
         self.name = self.config.model_id
         self.encoder = Encoder1d(self.config)
@@ -508,12 +509,12 @@ class SincNet(nn.Module):
         checkpoint = torch.load(weights_path, map_location=torch.device(device))
         if verbose:
             print(f"Loading SincNet:{weights_path}...")
-            print("EPOCH", checkpoint["epoch"], "// NSTEP", checkpoint["n_steps"]) 
+            print("EPOCH", checkpoint["epoch"], "// NSTEP", checkpoint["n_steps"])
         self.load_state_dict(checkpoint["state_dict"], strict=strict)
         for p in self.parameters():
             p.requires_grad = not freeze
         return self
-    
+
     def plot_kernels(self, save_path:str=None) -> None:
         """Plot the sinc kernels in the time domain"""
         if save_path is not None:
@@ -535,13 +536,6 @@ class SincNet(nn.Module):
             if save_path is not None:
                 fig.savefig(os.path.join(save_path, f"kernel_{i}.png"))
 
-    def freeze_autoencoder(self) -> None:
-        """Freeze the linear filterbank autoencoder"""
-        for module in[self.encoder, self.decoder]:
-            for p in module.parameters():
-                p.requires_grad = False
-        return self
-    
     @torch.no_grad()
     def magnitude(self, spectrogram:torch.Tensor) -> torch.Tensor:
         """Compute the magnitude spectrogram ~ (B,1,F,T) on the input signal"""

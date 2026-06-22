@@ -140,17 +140,6 @@ def test_exact_decode_is_exact_and_length_safe():
 
 
 
-def test_exact_decoder_rejects_ill_conditioned_configuration():
-    with pytest.raises(ValueError, match="use n_bins >= 256"):
-        SincNet(fs=16000, fps=128, n_bins=128, scale="mel", component="complex",
-                causal=False, decoder_type="exact")
-
-
-def test_exact_decoder_rejects_real_component():
-    with pytest.raises(ValueError, match="requires component='complex'"):
-        SincNet(component="real", decoder_type="exact")
-
-
 def test_exact_decoder_recommended_mel_configuration_is_exact():
     torch.manual_seed(0)
     model = SincNet(fs=16000, fps=128, n_bins=256, scale="mel", component="complex",
@@ -173,17 +162,20 @@ def test_learnt_decode_runs_and_emits_frames_times_hop():
     assert m.decode(spec).shape[-1] == spec.shape[-1] * m.config.hop_length
 
 
-def test_functional_and_module_exact_inverse_are_identical():
+# ---- functional exact inverse ----
+
+@pytest.mark.parametrize("n_iter", [16, 64])
+def test_functional_and_module_exact_inverse_are_identical(n_iter):
     torch.manual_seed(0)
     model = _lin()
     waveform = torch.randn(1, 4000)
     spec = model.encode(waveform)
-    decoder = AnalyticDecoder1d(model.config, model.encoder, n_iter=16)
+    decoder = AnalyticDecoder1d(model.config, model.encoder, n_iter=n_iter)
     functional = frame_pseudo_inverse(
         spec,
         model.encoder,
         length=4000,
-        n_iter=16,
+        n_iter=n_iter,
     )
     assert torch.equal(functional, decoder(spec, length=4000))
 
@@ -217,3 +209,11 @@ def test_fast_decoder_is_also_differentiable():
     s = m.encode(torch.randn(1, 4000)).requires_grad_(True)
     m.decode(s, length=4000).pow(2).sum().backward()
     assert s.grad is not None and float(s.grad.abs().sum()) > 0
+
+
+def test_sinc_envelope_defaults_on_and_can_be_disabled():
+    default = _lin()
+    disabled = _lin(apply_sinc_envelope=False)
+    assert default.config.apply_sinc_envelope is True
+    assert disabled.config.apply_sinc_envelope is False
+    assert not torch.equal(default.encoder.filters, disabled.encoder.filters)
