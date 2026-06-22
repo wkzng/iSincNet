@@ -1,9 +1,8 @@
 import torch
-
 import pytest
 
 from sincnet import SincNet, frame_pseudo_inverse
-from sincnet.model import FastAnalyticDecoder1d, AnalyticDecoder1d
+from sincnet.model import FastAnalyticDecoder1d, AnalyticDecoder1d, Decoder1d
 
 
 def _snr(a, b):
@@ -25,10 +24,11 @@ def test_default_decoder_is_fast():
 def test_decoder_type_selects_the_module():
     assert isinstance(_lin(decoder_type="fast").decoder, FastAnalyticDecoder1d)
     assert isinstance(_lin(decoder_type="exact").decoder, AnalyticDecoder1d)
+    assert isinstance(_lin(decoder_type="learnt").decoder, Decoder1d)
 
 
 def test_exact_decoder_iteration_configuration():
-    assert _lin(decoder_type="exact").decoder.n_iter == 64
+    assert _lin(decoder_type="exact").decoder.n_iter == 128
     assert _lin(decoder_type="exact", cg_iters=16).decoder.n_iter == 16
 
 
@@ -38,14 +38,10 @@ def test_cg_iters_must_be_positive(cg_iters):
         _lin(cg_iters=cg_iters)
 
 
-def test_unknown_decoder_type_raises():
-    with pytest.raises(AssertionError):
-        _lin(decoder_type="learnt")
-
-
-def test_decoders_have_no_trainable_weights():
+def test_only_learnt_has_trainable_weights():
     assert sum(p.numel() for p in _lin(decoder_type="fast").decoder.parameters()) == 0
     assert sum(p.numel() for p in _lin(decoder_type="exact").decoder.parameters()) == 0
+    assert any(p.requires_grad for p in _lin(decoder_type="learnt").decoder.parameters())
 
 
 def test_exact_decoder_not_double_registered():
@@ -143,11 +139,27 @@ def test_exact_decode_is_exact_and_length_safe():
     assert _snr(x, xhat) > 100
 
 
+
+def test_exact_decoder_recommended_mel_configuration_is_exact():
+    torch.manual_seed(0)
+    model = SincNet(fs=16000, fps=128, n_bins=256, scale="mel", component="complex",
+                    causal=False, decoder_type="exact")
+    waveform = torch.randn(1, 4000)
+    reconstructed = model.decode(model.encode(waveform), length=4000)
+    assert _snr(waveform, reconstructed) > 100
+
+
 def test_forward_preserves_input_length_exactly():
     torch.manual_seed(0)
     for dt in ("fast", "exact"):
         x = torch.randn(2, 4123)         # not a multiple of hop
         assert _lin(decoder_type=dt)(x).shape == (2, 4123)
+
+
+def test_learnt_decode_runs_and_emits_frames_times_hop():
+    m = _lin(decoder_type="learnt")
+    spec = m.encode(torch.randn(1, 4000))
+    assert m.decode(spec).shape[-1] == spec.shape[-1] * m.config.hop_length
 
 
 # ---- functional exact inverse ----

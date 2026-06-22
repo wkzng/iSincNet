@@ -6,10 +6,13 @@ audio/
 training/checkpoints
 training/general_logs
 training/tensorboard_logs
+.work/window_analysis/results/
 */trainings
 */trainings*
 logs/
 datasets/compiled/
 Makefile
 *.png
+!docs/assets/comparison_output.png
+!docs/assets/window_hann_sqrt_comparison.png
 *.zip

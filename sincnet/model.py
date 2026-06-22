@@ -22,21 +22,10 @@ class ModelArgs:
             Kernel spans `coverage` hops:        L  = coverage * H + 1       (kernel_size; coverage=4)
             Each complex bin = 2 real channels   (cos + sin); component="real"/"imag" -> factor 1.
 
-        Per frame the analysis maps an L-sample window -> factor*N real numbers (factor=2 complex).
-        There are TWO distinct thresholds (see verify in .work/feasibility_128.py):
-
-            - GLOBAL invertibility (information preserved; may need a wide overlap-add decoder):
-                  factor * N >= H   (redundancy >= 1)
-
-            - PER-FRAME invertibility (a near-per-frame decoder suffices; the exact analytic inverse
-              AND exact cross-scale projection both exist):
-                  factor * N >= L = coverage * H
-              => with factor=2:   N * FPS >= (coverage/2) * fs       (here  N * FPS >= 2 * fs)
-
-        The "2" is quadrature (real+imag). Below the per-frame line the transform is still GLOBALLY
-        invertible (factor*N >= H), but the per-frame guarantees are lost: there is no exact
-        per-frame inverse and no exact projection onto another scale (both need factor*N >= L).
-        Cross the line by raising N or shortening the kernel coverage.
+        Per frame the analysis maps an L-sample window -> factor*N real numbers. The count
+        ``factor*N >= H`` is necessary for global invertibility, but it is not sufficient: stable
+        inversion is controlled by the filterbank frame bounds. Strongly warped scales can leave
+        near-null waveform directions even when their coefficient count exceeds the hop.
 
         Practically pick FPS dividing fs:
             fs = 16000 = 2^7 * 5^3        -> {40, 50, 64, 80, 100, 125, 128, 160}
@@ -73,27 +62,44 @@ class ModelArgs:
         """real numbers produced per time frame = factor * n_bins"""
         return self.factor * self.n_bins
 
-    def check_invertibility(self) -> str | None:
-        """ Return a heads-up string if (n_bins, fps, kernel) sit below an invertibility threshold,
-            else None. `factor*n_bins >= hop` is global invertibility; `>= kernel_size` is per-frame.
+    @property
+    def recommended_stable_bins(self) -> int:
+        """Conservative power-of-two bin count for stable float32 inversion.
+
+        A maximum centre-frequency gap below 80% of the frame-rate alias spacing
+        matched every configuration that reconstructed above 100 dB with 128 CG
+        iterations in the analytical-decoder sweep.
         """
-        coeffs, H, L = self.coeffs_per_frame, self.hop_length, self.kernel_size
-        tag = f"{self.n_bins}bins/{self.fps}fps/{self.scale}"
+        n_bins = self.n_bins
+        while n_bins < 8192:
+            centers, _ = scale_freqs(self.fs, n_bins, self.scale)
+            if np.diff(centers).max() <= 0.8 * self.fps:
+                return n_bins
+            n_bins *= 2
+        return n_bins
+
+    @property
+    def model_id(self) -> str:
+        causal = "causal" if self.causal else "ncausal"
+        base = f"{self.fs}fs_{self.fps}fps_{self.n_bins}bins_{self.scale}_{self.component}_{causal}"
+        return f"{base}_sinc" if self.apply_sinc_envelope else base
+
+    def check_invertibility(self) -> str | None:
+        """Warn when coefficient count or frequency coverage makes inversion unsafe."""
+        coeffs, H = self.coeffs_per_frame, self.hop_length
         if coeffs < H:                       # redundancy < 1 -> information is genuinely lost
             need = -(-H // self.factor)      # ceil(H / factor)
             return warnings.warn(
-                f"{tag}: redundancy < 1 (factor*n_bins={coeffs} < hop={H}) -> the "
+                f"{self.model_id}: redundancy < 1 (factor*n_bins={coeffs} < hop={H}) -> the "
                 f"transform is information-lossy. Raise n_bins to >= {need}.",
                 stacklevel=2
             )
-        if coeffs < L:                       # per-frame non-invertible (per-frame guarantees lost)
-            need = -(-L // self.factor)      # ceil(L / factor)
+        stable_bins = self.recommended_stable_bins
+        if stable_bins > self.n_bins:
             return warnings.warn(
-                f"{tag}: per-frame non-invertible (factor*n_bins={coeffs} < "
-                f"kernel_size={L}). Still globally invertible, but there is no exact per-frame "
-                f"inverse and no exact projection onto another scale below this line. Set "
-                f"n_bins >= {need} (factor*n_bins >= kernel_size) or reduce the kernel coverage "
-                f"to cross it.",
+                f"{self.model_id}: frequency coverage is numerically ill-conditioned for float32 "
+                f"inversion. Coefficient count alone does not guarantee a stable frame; use "
+                f"n_bins >= {stable_bins} for the exact decoder.",
                 stacklevel=2
             )
 
@@ -191,6 +197,14 @@ def erb_freqs(fs:int, n_bins:int) -> np.ndarray:
     return centers, bands
 
 
+def scale_freqs(fs:int, n_bins:int, scale:str) -> tuple[np.ndarray, np.ndarray]:
+    """Return centre frequencies and bandwidths for a supported scale."""
+    functions = {"lin": lin_freqs, "mel": mel_freqs, "bark": bark_freqs, "erb": erb_freqs}
+    if scale not in functions:
+        raise ValueError("Only lin, mel, bark, erb scales are supported for the SincNet Kernel")
+    return functions[scale](fs, n_bins)
+
+
 
 def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causal:bool, apply_sinc_envelope:bool=False) -> torch.Tensor:
     """ Compute real and imaginary part of sinc kernels
@@ -206,16 +220,7 @@ def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causa
         Reference: Section 2.1 of  FILTERBANK DESIGN FOR END-TO-END SPEECH SEPARATION [Arxiv](https://arxiv.org/pdf/1910.10400)
     """
     #compute oscillatory frequencies (the zeroth-will be removed later)
-    if scale == "lin":
-        freq_hz, band_hz = lin_freqs(fs=fs, n_bins=n_bins)
-    elif scale == "mel":
-        freq_hz, band_hz = mel_freqs(fs=fs, n_bins=n_bins)
-    elif scale == "bark":
-        freq_hz, band_hz = bark_freqs(fs=fs, n_bins=n_bins)
-    elif scale == "erb":
-        freq_hz, band_hz = erb_freqs(fs=fs, n_bins=n_bins)
-    else:
-        raise ValueError("Only lin, mel, bark, erb scales are supported for the SincNet Kernel")
+    freq_hz, band_hz = scale_freqs(fs, n_bins, scale)
     
     #compute time intervals
     t = torch.linspace(-1/2, 1/2, steps=kernel_size).view(1,-1) * kernel_size / fs
@@ -244,7 +249,6 @@ def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causa
     weights = vibrations * envelope * window
     weights = weights / torch.sum(weights.abs(), dim=1).max().item()
     return weights
-
 
 
 
@@ -302,6 +306,38 @@ class Encoder1d(nn.Module):
     
 
 
+class Decoder1d(nn.Module):
+    def __init__(self, config:ModelArgs):
+        super().__init__()
+        self.config = config
+        self.conv1d = nn.Conv1d(
+            config.factor * config.n_bins, config.hop_length,
+            kernel_size=3, padding=1, bias=False
+        )
+        self.conv1d.weight.data = torch.ones_like(self.conv1d.weight.data)
+
+    def auto_resize(self, x:torch.Tensor) -> torch.Tensor:
+        """Automatically pad or cut the frequency-axis to meet the dimensions of the inverter"""
+        #resize frequency axis
+        _, _, n_bins, _ = x.shape
+        target_bins = self.config.n_bins
+        if n_bins > target_bins:
+            x = x[:,:,:target_bins]
+        elif n_bins < target_bins:
+            pad = target_bins - n_bins
+            #pad from (N,C,F,T) to (N,C,F+pad,T)
+            x = F.pad(x, (0,0,0,pad), mode="constant", value=0)
+        return x.flatten(1,2)
+
+    def forward(self, x:torch.Tensor, length:int|None=None) -> torch.Tensor:
+        """(B,C,F,T) -> (B, L). `length` is accepted for parity with AnalyticDecoder1d but the
+        learned decoder always emits n_frames * hop_length samples (it is ignored)."""
+        x = self.auto_resize(x)
+        x = self.conv1d(x).transpose(1,2)
+        x = x.flatten(1)
+        return x
+
+
 class AnalyticDecoder1d(nn.Module):
     """Training-free conjugate-gradient pseudo-inverse of the encoder.
 
@@ -325,7 +361,6 @@ class AnalyticDecoder1d(nn.Module):
         if length is None:
             length = spec.shape[-1] * self.config.hop_length
         return frame_pseudo_inverse(spec, self._encoder[0], length, self.n_iter, self.tol, self.reg)
-
 
 
 
@@ -422,7 +457,7 @@ class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
     def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128,
                  q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=True,
-                 decoder_type:str="fast", cg_iters:int=64):
+                 decoder_type:str="fast", cg_iters:int=128):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
             fps: int: number of frequency bins in the final 2D spectrogram
@@ -432,14 +467,16 @@ class SincNet(nn.Module):
             q_bits: int : number of bits used by the spectrogram quantizer
             causal: bool : enforce or not causality on filters
             apply_sinc_envelope: bool : whether to apply the sinc envelope to the kernels or not (see section 2.1 of https://arxiv.org/pdf/1910.10400.pdf for more details)
-            decoder_type: str : reconstruction decoder (both share the same encode/decode API, both length-exact, no weights):
-                "fast"  -> FastAnalyticDecoder1d: single-pass conv_transpose + 1/G equalizer, ~37 dB, differentiable (default)
-                "exact" -> AnalyticDecoder1d: conjugate-gradient pseudo-inverse, ~120 dB, slower, differentiable via implicit backward
+            decoder_type: str : reconstruction decoder (all share the same encode/decode API, all length-exact):
+                "fast"   -> FastAnalyticDecoder1d: single-pass conv_transpose + 1/G equalizer, ~37 dB, differentiable, no weights (default)
+                "exact"  -> AnalyticDecoder1d: conjugate-gradient pseudo-inverse, ~120 dB, no weights, slower,
+                            DIFFERENTIABLE via implicit backward (usable in training, e.g. source separation)
+                "learnt" -> Decoder1d: small trained overlap-add conv (requires a checkpoint)
             cg_iters: int : maximum CG iterations used by the exact decoder
         """
         super().__init__()
         assert component in ("real", "complex")
-        assert decoder_type in ("fast", "exact")
+        assert decoder_type in ("fast", "exact", "learnt")
         if cg_iters <= 0:
             raise ValueError("cg_iters must be positive")
         #NOTE: check that the number of bins is a power of 2
@@ -454,12 +491,29 @@ class SincNet(nn.Module):
         self.decoder_type = decoder_type
         self.cg_iters = cg_iters
         self.config.check_invertibility()
+        self.name = self.config.model_id
         self.encoder = Encoder1d(self.config)
-        self.decoder = (
-            FastAnalyticDecoder1d(self.config, self.encoder) if decoder_type == "fast"
-            else AnalyticDecoder1d(self.config, self.encoder, n_iter=cg_iters)
-        )
+        if decoder_type == "fast":
+            self.decoder = FastAnalyticDecoder1d(self.config, self.encoder)
+        elif decoder_type == "exact":
+            self.decoder = AnalyticDecoder1d(self.config, self.encoder, n_iter=cg_iters)
+        else:
+            self.decoder = Decoder1d(self.config)
         self.mulaw = MuLawQuant(q_bits=q_bits)
+
+    def load_pretrained_weights(self, weights_folder:str|None=None, freeze:bool=True, device:str="cpu", strict:bool=False, verbose:bool=False) -> None:
+        """ Load pretrained weights for sincnet (only the "learnt" decoder has weights to load) """
+        if self.decoder_type in ("fast", "exact"):
+            return self
+        weights_path = os.path.join(weights_folder, f"{self.name}.ckpt")
+        checkpoint = torch.load(weights_path, map_location=torch.device(device))
+        if verbose:
+            print(f"Loading SincNet:{weights_path}...")
+            print("EPOCH", checkpoint["epoch"], "// NSTEP", checkpoint["n_steps"])
+        self.load_state_dict(checkpoint["state_dict"], strict=strict)
+        for p in self.parameters():
+            p.requires_grad = not freeze
+        return self
 
     def plot_kernels(self, save_path:str=None) -> None:
         """Plot the sinc kernels in the time domain"""
