@@ -28,7 +28,7 @@ def test_decoder_type_selects_the_module():
 
 
 def test_exact_decoder_iteration_configuration():
-    assert _lin(decoder_type="exact").decoder.n_iter == 64
+    assert _lin(decoder_type="exact").decoder.n_iter == 128
     assert _lin(decoder_type="exact", cg_iters=16).decoder.n_iter == 16
 
 
@@ -137,6 +137,27 @@ def test_exact_decode_is_exact_and_length_safe():
     xhat = m.decode(m.encode(x), length=4000)
     assert xhat.shape == (1, 4000)
     assert _snr(x, xhat) > 100
+
+
+
+def test_exact_decoder_rejects_ill_conditioned_configuration():
+    with pytest.raises(ValueError, match="use n_bins >= 256"):
+        SincNet(fs=16000, fps=128, n_bins=128, scale="mel", component="complex",
+                causal=False, decoder_type="exact")
+
+
+def test_exact_decoder_rejects_real_component():
+    with pytest.raises(ValueError, match="requires component='complex'"):
+        SincNet(component="real", decoder_type="exact")
+
+
+def test_exact_decoder_recommended_mel_configuration_is_exact():
+    torch.manual_seed(0)
+    model = SincNet(fs=16000, fps=128, n_bins=256, scale="mel", component="complex",
+                    causal=False, decoder_type="exact")
+    waveform = torch.randn(1, 4000)
+    reconstructed = model.decode(model.encode(waveform), length=4000)
+    assert _snr(waveform, reconstructed) > 100
 
 
 def test_forward_preserves_input_length_exactly():

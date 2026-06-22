@@ -22,21 +22,10 @@ class ModelArgs:
             Kernel spans `coverage` hops:        L  = coverage * H + 1       (kernel_size; coverage=4)
             Each complex bin = 2 real channels   (cos + sin); component="real"/"imag" -> factor 1.
 
-        Per frame the analysis maps an L-sample window -> factor*N real numbers (factor=2 complex).
-        There are TWO distinct thresholds (see verify in .work/feasibility_128.py):
-
-            - GLOBAL invertibility (information preserved; may need a wide overlap-add decoder):
-                  factor * N >= H   (redundancy >= 1)
-
-            - PER-FRAME invertibility (a near-per-frame decoder suffices; the exact analytic inverse
-              AND exact cross-scale projection both exist):
-                  factor * N >= L = coverage * H
-              => with factor=2:   N * FPS >= (coverage/2) * fs       (here  N * FPS >= 2 * fs)
-
-        The "2" is quadrature (real+imag). Below the per-frame line the transform is still GLOBALLY
-        invertible (factor*N >= H), but the per-frame guarantees are lost: there is no exact
-        per-frame inverse and no exact projection onto another scale (both need factor*N >= L).
-        Cross the line by raising N or shortening the kernel coverage.
+        Per frame the analysis maps an L-sample window -> factor*N real numbers. The count
+        ``factor*N >= H`` is necessary for global invertibility, but it is not sufficient: stable
+        inversion is controlled by the filterbank frame bounds. Strongly warped scales can leave
+        near-null waveform directions even when their coefficient count exceeds the hop.
 
         Practically pick FPS dividing fs:
             fs = 16000 = 2^7 * 5^3        -> {40, 50, 64, 80, 100, 125, 128, 160}
@@ -73,11 +62,25 @@ class ModelArgs:
         """real numbers produced per time frame = factor * n_bins"""
         return self.factor * self.n_bins
 
-    def check_invertibility(self) -> str | None:
-        """ Return a heads-up string if (n_bins, fps, kernel) sit below an invertibility threshold,
-            else None. `factor*n_bins >= hop` is global invertibility; `>= kernel_size` is per-frame.
+    @property
+    def recommended_stable_bins(self) -> int:
+        """Conservative power-of-two bin count for stable float32 inversion.
+
+        A maximum centre-frequency gap below 80% of the frame-rate alias spacing
+        matched every configuration that reconstructed above 100 dB with 128 CG
+        iterations in the analytical-decoder sweep.
         """
-        coeffs, H, L = self.coeffs_per_frame, self.hop_length, self.kernel_size
+        n_bins = self.n_bins
+        while n_bins < 8192:
+            centers, _ = scale_freqs(self.fs, n_bins, self.scale)
+            if np.diff(centers).max() <= 0.8 * self.fps:
+                return n_bins
+            n_bins *= 2
+        return n_bins
+
+    def check_invertibility(self) -> str | None:
+        """Warn when coefficient count or frequency coverage makes inversion unsafe."""
+        coeffs, H = self.coeffs_per_frame, self.hop_length
         if coeffs < H:                       # redundancy < 1 -> information is genuinely lost
             need = -(-H // self.factor)      # ceil(H / factor)
             return warnings.warn(
@@ -85,14 +88,12 @@ class ModelArgs:
                 f"transform is information-lossy. Raise n_bins to >= {need}.",
                 stacklevel=2
             )
-        if coeffs < L:                       # per-frame non-invertible (per-frame guarantees lost)
-            need = -(-L // self.factor)      # ceil(L / factor)
+        stable_bins = self.recommended_stable_bins
+        if stable_bins > self.n_bins:
             return warnings.warn(
-                f"{self.model_id}: per-frame non-invertible (factor*n_bins={coeffs} < "
-                f"kernel_size={L}). Still globally invertible, but there is no exact per-frame "
-                f"inverse and no exact projection onto another scale below this line. Set "
-                f"n_bins >= {need} (factor*n_bins >= kernel_size) or reduce the kernel coverage "
-                f"to cross it.",
+                f"{self.model_id}: frequency coverage is numerically ill-conditioned for float32 "
+                f"inversion. Coefficient count alone does not guarantee a stable frame; use "
+                f"n_bins >= {stable_bins} for the exact decoder.",
                 stacklevel=2
             )
 
@@ -194,7 +195,6 @@ def erb_freqs(fs:int, n_bins:int) -> np.ndarray:
 
     bands = np.diff(edges)
     return centers, bands
-
 
 
 def scale_freqs(fs:int, n_bins:int, scale:str) -> tuple[np.ndarray, np.ndarray]:
@@ -363,6 +363,7 @@ class AnalyticDecoder1d(nn.Module):
         return frame_pseudo_inverse(spec, self._encoder[0], length, self.n_iter, self.tol, self.reg)
 
 
+
 class FastAnalyticDecoder1d(nn.Module):
     """ Fast differentiable decoder for Encoder1d.
 
@@ -455,8 +456,8 @@ class FastAnalyticDecoder1d(nn.Module):
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
     def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128,
-                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=True,
-                 decoder_type:str="fast", cg_iters:int=64):
+                 q_bits:int=8, causal:bool=False, apply_sinc_envelope:bool=False,
+                 decoder_type:str="fast", cg_iters:int=128):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
             fps: int: number of frequency bins in the final 2D spectrogram
@@ -476,7 +477,8 @@ class SincNet(nn.Module):
         super().__init__()
         assert component in ("real", "complex")
         assert decoder_type in ("fast", "exact", "learnt")
-        assert cg_iters > 0, "cg_iters must be positive"
+        if cg_iters <= 0:
+            raise ValueError("cg_iters must be positive")
         #NOTE: check that the number of bins is a power of 2
         assert n_bins > 0 and (n_bins & (n_bins - 1)) == 0
         #NOTE: real component is only compatible with causal kernels
@@ -498,7 +500,7 @@ class SincNet(nn.Module):
             self.decoder = Decoder1d(self.config)
         self.mulaw = MuLawQuant(q_bits=q_bits)
 
-    def load_pretrained_weights(self, weights_folder:str|None=None, freeze:bool=True, device:str="cpu", verbose:bool=False) -> None:
+    def load_pretrained_weights(self, weights_folder:str|None=None, freeze:bool=True, device:str="cpu", strict:bool=False, verbose:bool=False) -> None:
         """ Load pretrained weights for sincnet (only the "learnt" decoder has weights to load) """
         if self.decoder_type in ("fast", "exact"):
             return self
@@ -507,7 +509,7 @@ class SincNet(nn.Module):
         if verbose:
             print(f"Loading SincNet:{weights_path}...")
             print("EPOCH", checkpoint["epoch"], "// NSTEP", checkpoint["n_steps"]) 
-        self.load_state_dict(checkpoint["state_dict"], strict=True)
+        self.load_state_dict(checkpoint["state_dict"], strict=strict)
         for p in self.parameters():
             p.requires_grad = not freeze
         return self
