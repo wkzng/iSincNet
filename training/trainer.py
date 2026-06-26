@@ -78,11 +78,11 @@ class BaseTrainer:
         """Generate path to all logs and checkpoint dirs"""
         current_datetime = datetime.now()
         current_time = current_datetime.strftime('%Y-%m-%d-%H-%M-%S')
-        current_script_dir = os.path.dirname(self.current_script_path)
+        current_script_dir = "logs"
 
-        self.logs_dir = os.path.join(current_script_dir, "trainings", self.config.training_id, "logs")
-        self.checkpoint_dir = os.path.join(current_script_dir,"trainings", self.config.training_id, "ckpt")
-        self.tensorboard_dir = os.path.join(current_script_dir,"trainings", self.config.training_id, f"tensorboard/{current_time}")
+        self.logs_dir = os.path.join(current_script_dir, self.config.training_id, "logs")
+        self.checkpoint_dir = os.path.join(current_script_dir, self.config.training_id, "ckpt")
+        self.tensorboard_dir = os.path.join(current_script_dir, self.config.training_id, f"tensorboard/{current_time}")
 
         for directory in  [self.logs_dir, self.checkpoint_dir, self.tensorboard_dir]:
             os.makedirs(directory, exist_ok=True)
