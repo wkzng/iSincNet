@@ -21,7 +21,7 @@ class TrainConfig:
     training_id : str = "gtzan"
     component: str = 'complex'
     causal : bool = True
-    spectrogram_scale: str = "mel",
+    spectrogram_scale: str = "mel"
     model_selection_criterion: str = "log-L1"
     frame_rate: int = 128
     n_bins: int = 128
@@ -194,4 +194,3 @@ class BaseTrainer:
     def train(self):
         """train the model on the entire dataset"""
         pass
-
