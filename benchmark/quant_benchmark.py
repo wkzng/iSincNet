@@ -136,12 +136,18 @@ def default_quantizer_specs(
 # Metrics
 # ---------------------------------------------------------------------------
 
+def db_ratio(numerator: torch.Tensor, denominator: torch.Tensor, eps: float = 1e-8) -> float:
+    """Return a finite dB ratio with eps guarding the denominator and log input."""
+    ratio = numerator / (denominator + eps)
+    return 10 * torch.log10(torch.clamp(ratio, min=eps)).item()
+
+
 def sdr(ref: torch.Tensor, est: torch.Tensor, eps: float = 1e-8) -> float:
     """Signal-to-Distortion Ratio in dB.  ref, est ~ (samples,) or (C, samples)"""
     ref = ref.flatten().float()
     est = est.flatten().float()
     noise = est - ref
-    return 10 * torch.log10((ref ** 2).sum() / (noise ** 2).sum() + eps).item()
+    return db_ratio((ref ** 2).sum(), (noise ** 2).sum(), eps=eps)
 
 
 def si_sdr(ref: torch.Tensor, est: torch.Tensor, eps: float = 1e-8) -> float:
@@ -153,7 +159,7 @@ def si_sdr(ref: torch.Tensor, est: torch.Tensor, eps: float = 1e-8) -> float:
     alpha = (est * ref).sum() / ((ref ** 2).sum() + eps)
     proj = alpha * ref
     noise = est - proj
-    return 10 * torch.log10((proj ** 2).sum() / (noise ** 2).sum() + eps).item()
+    return db_ratio((proj ** 2).sum(), (noise ** 2).sum(), eps=eps)
 
 
 # ---------------------------------------------------------------------------
@@ -347,14 +353,12 @@ def plot_heatmaps(results: dict, n_bins: int, scale:str, metric: str = "si_sdr")
     has_demod = bool(demodulated)
     w = 0.2 if has_demod and predictive else 0.25 if predictive or has_demod else 0.35
     ax2.bar(x - w, polar_best, w, label="Polar (best config)", color="steelblue")
-    cart_x = x + w
     if predictive:
         ax2.bar(x, predictive_best, w, label="Predictive (best config)", color="seagreen")
-        cart_x = x + w
     if has_demod:
         demod_x = x + w if predictive else x
         ax2.bar(demod_x, demodulated_best, w, label="Demodulated (best config)", color="mediumpurple")
-        cart_x = x + (2 * w if predictive else w)
+    cart_x = x + (2 * w if has_demod and predictive else w)
     ax2.bar(cart_x, cart_vals, w, label="Cartesian (q=B/2)", color="tomato")
     ax2.set_xticks(x)
     ax2.set_xticklabels(x_labels, fontsize=7)
