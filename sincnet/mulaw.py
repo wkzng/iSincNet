@@ -169,6 +169,8 @@ class PolarMuLawQuant(nn.Module):
     Magnitude: mu-law companded, quantized to q_mag bits.
     Phase: uniform, quantized to q_phi bits.
     q_bits sets both defaults when q_mag/q_phi are not specified.
+    mag_silence_threshold reserves phase token 0 for low-magnitude bins when
+    set above 0. The default keeps the full phase vocabulary unchanged.
 
     compand() returns (polar, scale)
         polar ~ (B, 2, F, T) float, with channel 0 = magnitude and channel 1 = phase
@@ -182,6 +184,8 @@ class PolarMuLawQuant(nn.Module):
     dequantize() returns x_hat ~ (B, 2, F, T) float
     """
 
+    SILENCE_TOKEN = 0
+
     def __init__(
         self,
         q_mag: int | None = None,
@@ -190,6 +194,7 @@ class PolarMuLawQuant(nn.Module):
         eps: float = 1e-8,
         dither: bool = False,
         pre_scaling: bool = True,
+        mag_silence_threshold: int = 0,
     ):
         super().__init__()
         q_mag = q_bits if q_mag is None else q_mag
@@ -205,10 +210,20 @@ class PolarMuLawQuant(nn.Module):
         self.eps = eps
         self.dither = dither
         self.pre_scaling = pre_scaling
+        if not 0 <= mag_silence_threshold < self.mag_vocab_size:
+            raise ValueError("mag_silence_threshold must be in [0, mag_vocab_size)")
+        if mag_silence_threshold > 0 and self.phase_vocab_size <= 1:
+            raise ValueError("PolarMuLawQuant requires at least two phase tokens when phase silence is enabled")
+        self.mag_silence_threshold = mag_silence_threshold
+        self.phase_levels = self.phase_vocab_size - 1 if self.has_phase_silence else self.phase_vocab_size
 
         # Backwards-compatible aliases used by older experiments.
         self.n_mag = self.mag_vocab_size
         self.n_phi = self.phase_vocab_size
+
+    @property
+    def has_phase_silence(self) -> bool:
+        return self.mag_silence_threshold > 0
 
     def compand_magnitude(self, x: torch.Tensor) -> torch.Tensor:
         """Map magnitudes in [0, 1] to mu-law companded magnitudes in [0, 1]."""
@@ -268,14 +283,27 @@ class PolarMuLawQuant(nn.Module):
         x, scale = self.compand(x)
         magnitude, phase = self._split_channels(x, "polar tensor")
         mag_tokens = quantize_unit(magnitude, self.mag_vocab_size, add_noise=self.dither)
-        phi_tokens = quantize_unit(phase, self.phase_vocab_size, add_noise=self.dither)
+        phi_tokens = quantize_unit(phase, self.phase_levels, add_noise=self.dither)
+        if self.has_phase_silence:
+            phi_tokens = phi_tokens + 1
+            phi_tokens = torch.where(
+                mag_tokens < self.mag_silence_threshold,
+                torch.zeros_like(phi_tokens),
+                phi_tokens,
+            )
         return torch.stack([mag_tokens, phi_tokens], dim=1), scale
 
     def dequantize(self, x: torch.Tensor, scale: torch.Tensor | float = 1.0) -> torch.Tensor:
         """Reconstruct a complex spectrogram from stacked magnitude/phase tokens."""
         mag_tokens, phi_tokens = self._split_channels(x, "token tensor")
         magnitude = dequantize_unit(mag_tokens, self.mag_vocab_size)
-        phase = dequantize_unit(phi_tokens, self.phase_vocab_size)
+        if self.has_phase_silence:
+            silent = phi_tokens == self.SILENCE_TOKEN
+            phi_tokens = torch.clamp(phi_tokens - 1, min=0)
+            phase = dequantize_unit(phi_tokens, self.phase_levels)
+            phase = torch.where(silent, torch.full_like(phase, 0.5), phase)
+        else:
+            phase = dequantize_unit(phi_tokens, self.phase_levels)
         return self.expand(torch.stack([magnitude, phase], dim=1), scale=scale)
 
 
@@ -285,6 +313,8 @@ class PredictivePolarQuant(PolarMuLawQuant):
 
     Magnitude follows PolarMuLawQuant. Phase stores wrapped phase increments over
     time and reserves token 0 as SILENCE for low-magnitude bins.
+    Silent bins decode to zero phase increment, so a gated nonzero increment is
+    intentionally dropped and can shift later reconstructed phases after cumsum.
     """
 
     SILENCE_TOKEN = 0
@@ -309,8 +339,8 @@ class PredictivePolarQuant(PolarMuLawQuant):
         )
         if self.phase_vocab_size <= 1:
             raise ValueError("PredictivePolarQuant requires at least two phase tokens")
-        if not 0 <= mag_silence_threshold <= self.mag_vocab_size:
-            raise ValueError("mag_silence_threshold must be in [0, mag_vocab_size]")
+        if not 0 <= mag_silence_threshold < self.mag_vocab_size:
+            raise ValueError("mag_silence_threshold must be in [0, mag_vocab_size)")
         self.mag_silence_threshold = mag_silence_threshold
         self.phase_levels = self.phase_vocab_size - 1
 

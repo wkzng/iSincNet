@@ -1,7 +1,63 @@
 import torch
+import pytest
 
 from sincnet.model import SincNet
-from sincnet.mulaw import DemodulatedPolarQuant, PredictivePolarQuant
+from sincnet.mulaw import DemodulatedPolarQuant, PolarMuLawQuant, PredictivePolarQuant
+
+
+def test_polar_quant_default_keeps_full_phase_vocabulary():
+    q = PolarMuLawQuant(q_bits=4)
+    tokens = torch.zeros(1, 2, 1, 1, dtype=torch.long)
+    tokens[:, 0] = q.mag_vocab_size - 1
+
+    y = q.dequantize(tokens, scale=1.0)
+
+    assert q.mag_silence_threshold == 0
+    assert q.phase_levels == q.phase_vocab_size
+    assert y[:, 0].item() < 0
+    assert torch.allclose(y[:, 1], torch.zeros_like(y[:, 1]), atol=1e-6)
+
+
+def test_polar_quant_silence_gate_reserves_phase_zero():
+    q = PolarMuLawQuant(q_bits=6, q_phi=4, mag_silence_threshold=4)
+    x = torch.zeros(2, 2, 8, 5)
+
+    tokens, _ = q.quantize(x)
+    mag_tokens = tokens[:, 0]
+    phi_tokens = tokens[:, 1]
+
+    assert q.phase_levels == q.phase_vocab_size - 1
+    assert torch.all(mag_tokens < q.mag_silence_threshold)
+    assert torch.all(phi_tokens == q.SILENCE_TOKEN)
+
+
+def test_polar_quant_non_silent_phase_tokens_are_shifted():
+    q = PolarMuLawQuant(q_bits=6, q_phi=4, mag_silence_threshold=4)
+    x = torch.randn(2, 2, 8, 5)
+
+    tokens, _ = q.quantize(x)
+    mag_tokens = tokens[:, 0]
+    phi_tokens = tokens[:, 1]
+    non_silent = mag_tokens >= q.mag_silence_threshold
+
+    assert torch.all(phi_tokens[non_silent] >= 1)
+    assert torch.all(phi_tokens[non_silent] < q.phase_vocab_size)
+
+
+def test_polar_quant_silent_phase_dequantizes_to_zero_angle():
+    q = PolarMuLawQuant(q_bits=6, q_phi=4, mag_silence_threshold=4)
+    tokens = torch.zeros(1, 2, 1, 1, dtype=torch.long)
+    tokens[:, 0] = q.mag_vocab_size - 1
+
+    y = q.dequantize(tokens, scale=1.0)
+
+    assert y[:, 0].item() > 0
+    assert torch.allclose(y[:, 1], torch.zeros_like(y[:, 1]), atol=1e-6)
+
+
+def test_polar_quant_rejects_threshold_equal_to_vocab_size():
+    with pytest.raises(ValueError, match="mag_silence_threshold"):
+        PolarMuLawQuant(q_bits=4, mag_silence_threshold=16)
 
 
 def test_predictive_polar_quant_defaults_to_shared_q_bits():
@@ -18,6 +74,11 @@ def test_predictive_polar_quant_allows_phase_override():
     assert q.q_phi == 4
     assert q.mag_vocab_size == 64
     assert q.phase_vocab_size == 16
+
+
+def test_predictive_polar_rejects_threshold_equal_to_vocab_size():
+    with pytest.raises(ValueError, match="mag_silence_threshold"):
+        PredictivePolarQuant(q_bits=4, mag_silence_threshold=16)
 
 
 def test_predictive_polar_quantize_shapes_and_ranges():
@@ -47,6 +108,20 @@ def test_predictive_polar_silence_gate_reserves_phase_zero():
 
     assert torch.all(mag_tokens < q.mag_silence_threshold)
     assert torch.all(phi_tokens == q.SILENCE_TOKEN)
+
+
+def test_predictive_polar_silent_delta_drops_phase_increment():
+    q = PredictivePolarQuant(q_mag=2, q_phi=3, mag_silence_threshold=1)
+    tokens = torch.full((1, 2, 1, 3), q.mag_vocab_size - 1, dtype=torch.long)
+    tokens[:, 1, :, 0] = 4
+    tokens[:, 1, :, 1] = q.SILENCE_TOKEN
+    tokens[:, 1, :, 2] = 5
+
+    y = q.dequantize(tokens, scale=1.0)
+    phase = torch.atan2(y[:, 1], y[:, 0])
+
+    assert torch.allclose(phase[..., 1], phase[..., 0], atol=1e-5)
+    assert phase[..., 2].item() > phase[..., 1].item()
 
 
 def test_predictive_polar_dequantize_and_forward_roundtrip():
