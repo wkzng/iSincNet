@@ -17,15 +17,12 @@ Usage (drop into your notebook):
 
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
 from dataclasses import dataclass
 from itertools import product
 from typing import Callable
 
 from sincnet.model import SincNet, scale_freqs
 from sincnet.mulaw import DemodulatedPolarQuant, MuLawQuant, PolarMuLawQuant, PredictivePolarQuant
-from datasets.utils.waveform import WaveformLoader
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +267,9 @@ def plot_heatmaps(results: dict, n_bins: int, scale:str, metric: str = "si_sdr")
       2. Optional 2D heatmap of predictive polar (q_mag x q_phi)
       3. Bar chart comparing cartesian diagonal vs best polar/predictive at same total bits
     """
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as ticker
+
     assert metric in ("sdr", "si_sdr")
     label = "SI-SDR (dB)" if metric == "si_sdr" else "SDR (dB)"
 
@@ -378,6 +378,8 @@ def plot_heatmaps(results: dict, n_bins: int, scale:str, metric: str = "si_sdr")
 
 
 if __name__ == "__main__":
+    from datasets.utils.waveform import WaveformLoader
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     SAMPLE_RATE = 16000
     audio_loader = WaveformLoader(sample_rate=SAMPLE_RATE)

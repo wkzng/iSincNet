@@ -1,10 +1,52 @@
 import json
+import importlib
+import importlib.machinery
+import sys
+import types
 from types import SimpleNamespace
 
 import numpy as np
 
-import datasets.compiler as compiler_module
-from datasets.compiler import ChunkDatasetIterator, Compiler, MultiDatasetIterator
+
+class StubWaveformLoader:
+    def __init__(self, *args, **kwargs):
+        pass
+
+
+def stub_module(name: str, **attrs):
+    module = types.ModuleType(name)
+    module.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
+    for attr, value in attrs.items():
+        setattr(module, attr, value)
+    return module
+
+
+def import_compiler_with_optional_stubs():
+    stubs = {
+        "tqdm": stub_module("tqdm", tqdm=lambda iterable=None, *args, **kwargs: iterable if iterable is not None else []),
+        "pandas": stub_module("pandas", DataFrame=None),
+        "compress_json": stub_module("compress_json", dump=lambda data, path: None),
+        "dotenv": stub_module("dotenv", load_dotenv=lambda: None),
+        "datasets.utils.hdf5writer": stub_module("datasets.utils.hdf5writer", H5Writer=object),
+        "datasets.utils.waveform": stub_module("datasets.utils.waveform", WaveformLoader=StubWaveformLoader),
+    }
+    originals = {name: sys.modules.get(name) for name in stubs}
+    try:
+        for name, module in stubs.items():
+            sys.modules.setdefault(name, module)
+        return importlib.import_module("datasets.compiler")
+    finally:
+        for name, original in originals.items():
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
+
+
+compiler_module = import_compiler_with_optional_stubs()
+ChunkDatasetIterator = compiler_module.ChunkDatasetIterator
+Compiler = compiler_module.Compiler
+MultiDatasetIterator = compiler_module.MultiDatasetIterator
 
 
 class FakeWaveformLoader:

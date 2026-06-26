@@ -6,12 +6,9 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import StepLR
-from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import Dataset
 
 from training.utils.general import set_random_seed, custom_load_state_dict
-from training.utils.audio_augmentations import AudioAugmenter
-from training.utils.stft import TorchSTFT
 
 
 
@@ -106,6 +103,8 @@ class BaseTrainer:
 
         self.device = torch.device(device)
         self.model.to(self.device)
+        from training.utils.stft import TorchSTFT
+
         self.stft = TorchSTFT(**asdict(self.stft_config)).to(device=self.device)
         print(f"Training device: {self.device}")
 
@@ -130,12 +129,16 @@ class BaseTrainer:
 
     def initialise_tensorboard_writer(self):
         """initise the tensorbord log writer in order to keep track of loss, accuracy and TNSE"""
+        from torch.utils.tensorboard import SummaryWriter
+
         self.writer = SummaryWriter(self.tensorboard_dir)
         self.writer.add_text("arguments", json.dumps(asdict(self.config)))
 
 
     def initialise_audio_augmentation(self):
         """initise the CPU and GPU compatible audio augmenation (reverb, pitch shift, etc...) module """
+        from training.utils.audio_augmentations import AudioAugmenter
+
         self.audio_augmenter = AudioAugmenter(sr=self.config.sample_rate)
 
 
