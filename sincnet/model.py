@@ -8,7 +8,7 @@ import warnings
 import numpy as np
 from dataclasses import dataclass, asdict
 from .cgdecoder import frame_pseudo_inverse
-from .mulaw import MuLawQuant
+from .mulaw import MuLawQuant, PolarMuLawQuant
 
 
 
@@ -456,7 +456,7 @@ class FastAnalyticDecoder1d(nn.Module):
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
     def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128,
-                 q_bits:int=8, causal:bool=True, apply_sinc_envelope:bool=True,
+                 q_bits:int=6, causal:bool=True, apply_sinc_envelope:bool=True,
                  decoder_type:str="fast", cg_iters:int=128):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
@@ -499,7 +499,18 @@ class SincNet(nn.Module):
             self.decoder = AnalyticDecoder1d(self.config, self.encoder, n_iter=cg_iters)
         else:
             self.decoder = Decoder1d(self.config)
-        self.mulaw = MuLawQuant(q_bits=q_bits)
+        self.initialise_mulaw(coordinate_system="polar", q_bits=q_bits)
+
+    def initialise_mulaw(self, coordinate_system: str = "polar", q_bits: int = 6) -> nn.Module:
+        """Initialise the spectrogram quantizer."""
+        coordinate_system = coordinate_system.lower()
+        if coordinate_system == "polar":
+            self.mulaw = PolarMuLawQuant(q_bits=q_bits)
+        elif coordinate_system in ("cartesian", "cartesien"):
+            self.mulaw = MuLawQuant(q_bits=q_bits)
+        else:
+            raise ValueError("coordinate_system must be 'polar' or 'cartesian'")
+        return self.mulaw
 
     def load_pretrained_weights(self, weights_folder:str|None=None, freeze:bool=True, device:str="cpu", strict:bool=False, verbose:bool=False) -> None:
         """ Load pretrained weights for sincnet (only the "learnt" decoder has weights to load) """
