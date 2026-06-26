@@ -165,7 +165,6 @@ class SincNetTrainer(BaseTrainer):
                 local_losses = {}
                 waveforms = batch["waveform"].to(self.device)
 
-                waveforms[0] *= 0
                 if 2 * np.random.random() < 1:
                     waveforms = torch.flip(waveforms, dims=[-1])
                 if 2 * np.random.random() < 1:
