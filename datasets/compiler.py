@@ -77,8 +77,8 @@ class ChunkDatasetIterator:
                     continue
 
                 # generate a train or test sample
-                wav = np.concatenate(buffer)
-                wav = wav[:chunk_samples]
+                wav = np.concatenate(buffer, axis=-1)
+                wav = wav[..., :chunk_samples]
                 yield {"audio": wav}
 
 
@@ -94,12 +94,13 @@ class MultiDatasetIterator:
         peaks = []
         for dataset in self.datasets:
             peaks.extend(dataset.peaks)
+        peaks = [float(peak) for peak in peaks]
         stats = {
-            'mean': np.mean(peaks),
-            'std': np.std(peaks),
-            'p95': np.percentile(peaks, 95),
-            'p99': np.percentile(peaks, 99),
-            'max': np.max(peaks)
+            'mean': float(np.mean(peaks)),
+            'std': float(np.std(peaks)),
+            'p95': float(np.percentile(peaks, 95)),
+            'p99': float(np.percentile(peaks, 99)),
+            'max': float(np.max(peaks))
         }
         print(f"Peak statistics:")
         print(f"  Mean: {stats['mean']:.3f}")
@@ -159,7 +160,7 @@ class Compiler:
                 break
 
         pd.DataFrame(rows).to_parquet(self.compilation_file)
-        compress_json.dump(self.iterator.compute_peaks_stats(), peaks_file)
+        compress_json.dump(self.iterator.compute_peaks_stats(), self.peaks_file)
         print("[Compilation] completed...")
 
 
