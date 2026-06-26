@@ -94,6 +94,8 @@ def quantize_unit(x: torch.Tensor, vocab_size: int, add_noise: bool = False) -> 
 
 def dequantize_unit(x: torch.Tensor, vocab_size: int) -> torch.Tensor:
     """Map integer bins in {0, ..., vocab_size - 1} back to [0, 1]."""
+    if vocab_size == 1:
+        return torch.zeros_like(x, dtype=torch.float)
     return x.float() / (vocab_size - 1)
 
 
@@ -275,3 +277,211 @@ class PolarMuLawQuant(nn.Module):
         magnitude = dequantize_unit(mag_tokens, self.mag_vocab_size)
         phase = dequantize_unit(phi_tokens, self.phase_vocab_size)
         return self.expand(torch.stack([magnitude, phase], dim=1), scale=scale)
+
+
+class PredictivePolarQuant(PolarMuLawQuant):
+    """
+    Polar quantizer with predictive phase tokens.
+
+    Magnitude follows PolarMuLawQuant. Phase stores wrapped phase increments over
+    time and reserves token 0 as SILENCE for low-magnitude bins.
+    """
+
+    SILENCE_TOKEN = 0
+
+    def __init__(
+        self,
+        q_mag: int | None = None,
+        q_phi: int | None = None,
+        q_bits: int = 6,
+        eps: float = 1e-8,
+        dither: bool = False,
+        pre_scaling: bool = True,
+        mag_silence_threshold: int = 4,
+    ):
+        super().__init__(
+            q_mag=q_mag,
+            q_phi=q_phi,
+            q_bits=q_bits,
+            eps=eps,
+            dither=dither,
+            pre_scaling=pre_scaling,
+        )
+        if self.phase_vocab_size <= 1:
+            raise ValueError("PredictivePolarQuant requires at least two phase tokens")
+        if not 0 <= mag_silence_threshold <= self.mag_vocab_size:
+            raise ValueError("mag_silence_threshold must be in [0, mag_vocab_size]")
+        self.mag_silence_threshold = mag_silence_threshold
+        self.phase_levels = self.phase_vocab_size - 1
+
+    @staticmethod
+    def _wrap_phase(x: torch.Tensor) -> torch.Tensor:
+        return torch.remainder(x + torch.pi, 2 * torch.pi) - torch.pi
+
+    def _phase_to_delta(self, phase: torch.Tensor) -> torch.Tensor:
+        delta = torch.empty_like(phase)
+        delta[..., 0] = phase[..., 0]
+        delta[..., 1:] = phase[..., 1:] - phase[..., :-1]
+        return self._wrap_phase(delta)
+
+    def quantize(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize complex spectrograms using magnitude and predictive phase tokens."""
+        self._validate_complex_input(x)
+        real = x[:, 0]
+        imag = x[:, 1]
+
+        magnitude = torch.sqrt(real**2 + imag**2)
+        scale = get_scale(magnitude, eps=self.eps, pre_scaling=self.pre_scaling)
+        magnitude = self.compand_magnitude(magnitude / self._scale_for_magnitude(scale))
+        mag_tokens = quantize_unit(magnitude, self.mag_vocab_size, add_noise=self.dither)
+
+        phase = torch.atan2(imag, real)
+        delta_phase = self._phase_to_delta(phase)
+        phase_unit = (delta_phase + torch.pi) / (2 * torch.pi)
+        phi_tokens_raw = quantize_unit(
+            phase_unit,
+            self.phase_levels,
+            add_noise=self.dither,
+        ) + 1
+        phi_tokens = torch.where(
+            mag_tokens < self.mag_silence_threshold,
+            torch.zeros_like(phi_tokens_raw),
+            phi_tokens_raw,
+        )
+
+        return torch.stack([mag_tokens, phi_tokens], dim=1), scale
+
+    def dequantize(self, x: torch.Tensor, scale: torch.Tensor | float = 1.0) -> torch.Tensor:
+        """Reconstruct complex spectrograms from magnitude and predictive phase tokens."""
+        mag_tokens, phi_tokens = self._split_channels(x, "token tensor")
+
+        magnitude = dequantize_unit(mag_tokens, self.mag_vocab_size)
+        magnitude = self.expand_magnitude(magnitude) * self._scale_for_magnitude(scale)
+
+        silent = phi_tokens == self.SILENCE_TOKEN
+        phi_tokens_unshifted = torch.clamp(phi_tokens - 1, min=0)
+        phase_unit = dequantize_unit(phi_tokens_unshifted, self.phase_levels)
+        delta_phase = phase_unit * (2 * torch.pi) - torch.pi
+        delta_phase = torch.where(silent, torch.zeros_like(delta_phase), delta_phase)
+        phase = torch.cumsum(delta_phase, dim=-1)
+
+        real = magnitude * torch.cos(phase)
+        imag = magnitude * torch.sin(phase)
+        return torch.stack([real, imag], dim=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        tokens, scale = self.quantize(x)
+        return self.dequantize(tokens, scale)
+
+
+class DemodulatedPolarQuant(PolarMuLawQuant):
+    """
+    Polar quantizer that stores mu-law companded demodulated phase.
+
+    Phase is represented as the wrapped residual after removing the deterministic
+    carrier rotation for each frequency bin. Unlike PredictivePolarQuant this is
+    absolute per frame and does not accumulate reconstruction error over time.
+    """
+
+    def __init__(
+        self,
+        center_frequencies_hz: torch.Tensor,
+        frame_rate: float,
+        q_mag: int | None = None,
+        q_phi: int | None = None,
+        q_bits: int = 6,
+        eps: float = 1e-8,
+        dither: bool = False,
+        pre_scaling: bool = True,
+    ):
+        super().__init__(
+            q_mag=q_mag,
+            q_phi=q_phi,
+            q_bits=q_bits,
+            eps=eps,
+            dither=dither,
+            pre_scaling=pre_scaling,
+        )
+        if self.phase_vocab_size <= 1:
+            raise ValueError("DemodulatedPolarQuant requires at least two phase tokens")
+        center_frequencies_hz = torch.as_tensor(center_frequencies_hz, dtype=torch.float)
+        if center_frequencies_hz.ndim != 1:
+            raise ValueError("center_frequencies_hz must be a 1D tensor or sequence")
+        if frame_rate <= 0:
+            raise ValueError("frame_rate must be positive")
+        self.register_buffer("center_frequencies_hz", center_frequencies_hz)
+        self.frame_rate = float(frame_rate)
+        self.phase_mu = float(self.phase_vocab_size - 1)
+        self.log_phase_mu = math.log1p(self.phase_mu)
+
+    @staticmethod
+    def _wrap_phase(x: torch.Tensor) -> torch.Tensor:
+        return torch.remainder(x + torch.pi, 2 * torch.pi) - torch.pi
+
+    def _carrier_phase(self, n_frames: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        centers = self.center_frequencies_hz.to(device=device, dtype=dtype)
+        frame_idx = torch.arange(n_frames, device=device, dtype=dtype)
+        carrier = (2 * torch.pi * centers[:, None] / self.frame_rate) * frame_idx[None]
+        return carrier.unsqueeze(0)
+
+    def compand_phase(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply mu-law companding to phase residuals in [-pi, pi]."""
+        phase_unit = x / torch.pi
+        phase_unit = torch.sign(phase_unit) * torch.log1p(self.phase_mu * torch.abs(phase_unit)) / self.log_phase_mu
+        return phase_unit * torch.pi
+
+    def expand_phase(self, x: torch.Tensor) -> torch.Tensor:
+        """Invert mu-law phase companding back to residuals in [-pi, pi]."""
+        phase_unit = x / torch.pi
+        phase_unit = torch.sign(phase_unit) * torch.expm1(torch.abs(phase_unit) * self.log_phase_mu) / self.phase_mu
+        return phase_unit * torch.pi
+
+    def _demodulate_phase(self, phase: torch.Tensor) -> torch.Tensor:
+        if phase.shape[-2] != self.center_frequencies_hz.numel():
+            raise ValueError(
+                f"Expected {self.center_frequencies_hz.numel()} frequency bins, got {phase.shape[-2]}"
+            )
+        carrier = self._carrier_phase(phase.shape[-1], dtype=phase.dtype, device=phase.device)
+        return self._wrap_phase(phase - carrier)
+
+    def _remodulate_phase(self, residual: torch.Tensor) -> torch.Tensor:
+        if residual.shape[-2] != self.center_frequencies_hz.numel():
+            raise ValueError(
+                f"Expected {self.center_frequencies_hz.numel()} frequency bins, got {residual.shape[-2]}"
+            )
+        carrier = self._carrier_phase(residual.shape[-1], dtype=residual.dtype, device=residual.device)
+        return residual + carrier
+
+    def compand(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert a complex spectrogram to magnitude and demodulated phase values."""
+        self._validate_complex_input(x)
+        real = x[:, 0]
+        imag = x[:, 1]
+
+        magnitude = torch.sqrt(real**2 + imag**2)
+        scale = get_scale(magnitude, eps=self.eps, pre_scaling=self.pre_scaling)
+        magnitude = self.compand_magnitude(magnitude / self._scale_for_magnitude(scale))
+
+        phase = torch.atan2(imag, real)
+        phase = self._demodulate_phase(phase)
+        phase = self.compand_phase(phase)
+        phase = (phase + torch.pi) / (2 * torch.pi)
+
+        return torch.stack([magnitude, phase], dim=1), scale
+
+    def expand(self, x: torch.Tensor, scale: torch.Tensor | float = 1.0) -> torch.Tensor:
+        """Reconstruct a complex spectrogram from demodulated polar values."""
+        magnitude, phase = self._split_channels(x, "demodulated polar tensor")
+
+        magnitude = self.expand_magnitude(magnitude) * self._scale_for_magnitude(scale)
+        phase = phase * (2 * torch.pi) - torch.pi
+        phase = self.expand_phase(phase)
+        phase = self._remodulate_phase(phase)
+
+        real = magnitude * torch.cos(phase)
+        imag = magnitude * torch.sin(phase)
+        return torch.stack([real, imag], dim=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        tokens, scale = self.quantize(x)
+        return self.dequantize(tokens, scale)

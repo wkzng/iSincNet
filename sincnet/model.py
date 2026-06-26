@@ -8,7 +8,7 @@ import warnings
 import numpy as np
 from dataclasses import dataclass, asdict
 from .cgdecoder import frame_pseudo_inverse
-from .mulaw import MuLawQuant, PolarMuLawQuant
+from .mulaw import DemodulatedPolarQuant, MuLawQuant, PolarMuLawQuant, PredictivePolarQuant
 
 
 
@@ -506,10 +506,19 @@ class SincNet(nn.Module):
         coordinate_system = coordinate_system.lower()
         if coordinate_system == "polar":
             self.mulaw = PolarMuLawQuant(q_bits=q_bits)
+        elif coordinate_system in ("predictive", "predictive_polar"):
+            self.mulaw = PredictivePolarQuant(q_bits=q_bits)
+        elif coordinate_system in ("demodulated", "demodulated_polar"):
+            center_frequencies_hz, _ = scale_freqs(self.config.fs, self.config.n_bins, self.config.scale)
+            self.mulaw = DemodulatedPolarQuant(
+                center_frequencies_hz=center_frequencies_hz,
+                frame_rate=self.config.fps,
+                q_bits=q_bits,
+            )
         elif coordinate_system in ("cartesian", "cartesien"):
             self.mulaw = MuLawQuant(q_bits=q_bits)
         else:
-            raise ValueError("coordinate_system must be 'polar' or 'cartesian'")
+            raise ValueError("coordinate_system must be 'polar', 'predictive', 'demodulated', or 'cartesian'")
         return self.mulaw
 
     def load_pretrained_weights(self, weights_folder:str|None=None, freeze:bool=True, device:str="cpu", strict:bool=False, verbose:bool=False) -> None:
