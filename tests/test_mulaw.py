@@ -2,7 +2,7 @@ import torch
 import pytest
 
 from sincnet.model import SincNet
-from sincnet.mulaw import DemodulatedPolarQuant, PolarMuLawQuant, PredictivePolarQuant
+from sincnet.mulaw import DemodulatedPolarQuant, PolarMuLawQuant, PredictivePolarQuant, TrigMuLawQuant
 
 
 def test_polar_quant_default_keeps_full_phase_vocabulary():
@@ -58,6 +58,67 @@ def test_polar_quant_silent_phase_dequantizes_to_zero_angle():
 def test_polar_quant_rejects_threshold_equal_to_vocab_size():
     with pytest.raises(ValueError, match="mag_silence_threshold"):
         PolarMuLawQuant(q_bits=4, mag_silence_threshold=16)
+
+
+def test_trig_mulaw_quantize_dequantize_shapes_and_ranges():
+    q = TrigMuLawQuant(q_mag=6, q_trig=4)
+    x = torch.randn(2, 2, 8, 5)
+
+    tokens, scale = q.quantize(x)
+    y = q.dequantize(tokens, scale)
+
+    assert tokens.shape == (2, 3, 8, 5)
+    assert tokens.dtype == torch.long
+    assert scale.shape == (2, 1, 1, 1)
+    assert tokens[:, 0].min() >= 0
+    assert tokens[:, 0].max() < q.mag_vocab_size
+    assert tokens[:, 1].min() >= 0
+    assert tokens[:, 1].max() < q.trig_vocab_size
+    assert tokens[:, 2].min() >= 0
+    assert tokens[:, 2].max() < q.trig_vocab_size
+    assert y.shape == x.shape
+    assert torch.isfinite(y).all()
+
+
+def test_trig_mulaw_zero_input_roundtrips_to_zero():
+    q = TrigMuLawQuant(q_bits=6)
+    x = torch.zeros(2, 2, 8, 5)
+
+    tokens, scale = q.quantize(x)
+    y = q.dequantize(tokens, scale)
+
+    assert torch.allclose(y, torch.zeros_like(y), atol=1e-7)
+
+
+def test_trig_mulaw_dequantize_renormalizes_direction():
+    q = TrigMuLawQuant(q_mag=8, q_trig=2)
+    tokens = torch.zeros(1, 3, 1, 1, dtype=torch.long)
+    tokens[:, 0] = q.mag_vocab_size - 1
+    tokens[:, 1] = q.trig_vocab_size - 1
+    tokens[:, 2] = q.trig_vocab_size - 1
+
+    y = q.dequantize(tokens, scale=1.0)
+    magnitude = torch.sqrt((y**2).sum(dim=1))
+
+    assert torch.allclose(magnitude, torch.ones_like(magnitude), atol=1e-6)
+
+
+def test_sincnet_initialise_mulaw_trig():
+    model = SincNet(
+        fs=16000,
+        fps=128,
+        scale="lin",
+        component="complex",
+        n_bins=128,
+        causal=False,
+    )
+
+    quantizer = model.initialise_mulaw("trig", q_bits=6)
+
+    assert isinstance(quantizer, TrigMuLawQuant)
+    assert model.mulaw is quantizer
+    assert quantizer.q_mag == 6
+    assert quantizer.q_trig == 6
 
 
 def test_predictive_polar_quant_defaults_to_shared_q_bits():
