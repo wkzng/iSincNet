@@ -502,7 +502,7 @@ class SincNet(nn.Module):
             self.decoder = Decoder1d(self.config)
         self.initialise_mulaw(coordinate_system="polar", q_bits=q_bits, pre_scaling=mulaw_pre_scaling)
 
-    def initialise_mulaw(self, coordinate_system: str = "polar", q_bits: int = 6, pre_scaling:bool=True) -> nn.Module:
+    def initialise_mulaw(self, coordinate_system: str = "polar", q_bits: int = 6, pre_scaling:bool=False) -> nn.Module:
         """Initialise the spectrogram quantizer."""
         coordinate_system = coordinate_system.lower()
         if coordinate_system == "polar":
