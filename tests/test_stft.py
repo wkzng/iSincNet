@@ -64,8 +64,8 @@ def test_fps_matches_hop():
     for seconds in (1, 2, 3):
         L = fs * seconds
         spec = m.encode(torch.randn(L))
-        # exactly fps frames per second: T == L // hop == fps * seconds (no boundary +1 frame)
-        assert spec.shape[-1] == L // m.hop_length == fps * seconds
+        # center=True keeps the right boundary frame: T == 1 + L // hop.
+        assert spec.shape[-1] == 1 + L // m.hop_length == 1 + fps * seconds
 
 
 # ---- invertibility ----
@@ -91,6 +91,19 @@ def test_batch_matches_single():
         assert torch.allclose(batch[i], m.forward(xs[i]).squeeze(0), atol=1e-5)
 
 
+def test_stft_is_linear_to_floating_point_precision():
+    m = STFT(fs=16000, fps=128, n_bins=128)
+    torch.manual_seed(0)
+    sources = [torch.randn(1, 16000 * 5) * 0.25 for _ in range(3)]
+    mix_spec = m.encode(sum(sources))
+    source_specs = torch.cat([m.encode(source) for source in sources], dim=0)
+    linear_mix_spec = source_specs.sum(dim=0, keepdim=True)
+    diff = mix_spec - linear_mix_spec
+
+    assert diff.norm() / mix_spec.norm() < 1e-6
+    assert diff.abs().max() < 1e-5
+
+
 # ---- SincNet-parity perks: magnitude / griffin-lim / mulaw ----
 
 def test_magnitude_shape_both_layouts():
@@ -109,7 +122,7 @@ def test_griffin_lim_improves_consistency():
     t = torch.linspace(0, 1, fs)
     x = 0.5 * torch.sin(2 * torch.pi * 220 * t).unsqueeze(0)
     target_mag = m.magnitude(m.encode(x))
-    length = target_mag.shape[-1] * m.hop_length   # T*hop -> re-encoding yields exactly T frames
+    length = (target_mag.shape[-1] - 1) * m.hop_length
 
     def consistency(spec):
         return (m.magnitude(m.encode(m.decode(spec, length=length))) - target_mag).norm()
@@ -117,6 +130,18 @@ def test_griffin_lim_improves_consistency():
     err0 = consistency(m.griffin_lim(target_mag, n_iters=0))    # random phase
     err1 = consistency(m.griffin_lim(target_mag, n_iters=60))   # refined
     assert err1 < 0.5 * err0, f"GLA did not improve consistency: {err0:.1f} -> {err1:.1f}"
+
+
+def test_griffin_lim_has_no_boundary_spike():
+    """Dropping the centered right-boundary frame makes arbitrary phase explode at the last sample."""
+    fs = 16000
+    m = STFT(fs=fs, fps=128, n_bins=128)
+    t = torch.arange(fs).float() / fs
+    x = 0.2 * torch.sin(2 * torch.pi * 440 * t).unsqueeze(0)
+    spec = m.griffin_lim(m.magnitude(m.encode(x)), n_iters=10)
+    wav = m.decode(spec, length=x.shape[-1])
+    peak_to_rms = wav.abs().max() / wav.square().mean().sqrt()
+    assert peak_to_rms < 10.0
 
 
 def test_refine_spectrogram_phase_runs():

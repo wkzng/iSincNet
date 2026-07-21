@@ -73,28 +73,28 @@ class STFT(nn.Module):
         raise ValueError("Expected mono waveform (L,), (B,L) or (B,1,L)")
 
     def _analysis(self, wav:torch.Tensor) -> torch.Tensor:
-        """(B,L) -> complex (B,F,T), dropping the highest (Nyquist) bin and the trailing frame.
+        """(B,L) -> complex (B,F,T), dropping only the highest (Nyquist) bin.
 
-        torch.stft(center=True) yields 1 + L//hop frames; its last frame is centered at sample L
-        and built almost entirely from reflection padding, so it is redundant. Dropping it makes
-        the frame count exactly T = L//hop = fps*seconds (a clean fps-per-second grid), with no
-        audible reconstruction cost.
+        torch.stft(center=True) yields 1 + L//hop frames for hop-aligned signals. The final
+        frame is centered at sample L and mostly comes from reflection padding, but keeping it
+        is important when decoding modified spectra: otherwise arbitrary phase near the right
+        boundary can be amplified by the small inverse-STFT window envelope.
         """
         x = self._as_waveform(wav).to(self.window.dtype)
         spectrum = torch.stft(
             x, self.n_fft, self.hop_length, self.win_length,
             window=self.window, return_complex=True, center=True
         )
-        return spectrum[:, :self.n_bins, :-1].contiguous()
+        return spectrum[:, :self.n_bins].contiguous()
 
     def _synthesis(self, spectrum:torch.Tensor, length:int|None=None) -> torch.Tensor:
         """complex (B,F,T) -> (B,L), restoring the dropped bin as zeros.
 
-        With the trailing analysis frame dropped, the natural signal length for T frames is T*hop;
-        default to it when no explicit length is given."""
+        With center=True, T frames naturally cover (T - 1) hops; default to that when no explicit
+        length is given."""
         B, _, T = spectrum.shape
         if length is None:
-            length = T * self.hop_length
+            length = (T - 1) * self.hop_length
         full = spectrum.new_zeros((B, self.n_fft // 2 + 1, T))
         full[:, :self.n_bins] = spectrum
         return torch.istft(
@@ -135,7 +135,7 @@ class STFT(nn.Module):
         else:
             angle = initial_angle.unsqueeze(1) if initial_angle.ndim == 3 else initial_angle
 
-        length = magnitude.shape[-1] * self.hop_length   # T*hop: re-analysis yields exactly T frames
+        length = (magnitude.shape[-1] - 1) * self.hop_length
         for _ in range(n_iters+1):
             spectrum = (magnitude * torch.complex(torch.cos(angle), torch.sin(angle))).squeeze(1)
             forward = self._analysis(self._synthesis(spectrum, length=length))
