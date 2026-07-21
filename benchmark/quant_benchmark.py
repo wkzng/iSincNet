@@ -22,7 +22,7 @@ from itertools import product
 from typing import Callable
 
 from sincnet.model import SincNet, scale_freqs
-from sincnet.mulaw import DemodulatedPolarQuant, MuLawQuant, PolarMuLawQuant, PredictivePolarQuant, TrigMuLawQuant
+from sincnet.mulaw import DemodulatedPolarQuant, MuLawQuant, PolarMuLawQuant, PredictivePolarQuant
 
 
 # ---------------------------------------------------------------------------
@@ -66,21 +66,17 @@ def default_quantizer_specs(
     q_phi_polar: list[int] | None = None,
     q_mag_predictive: list[int] | None = None,
     q_phi_predictive: list[int] | None = None,
-    q_mag_trig: list[int] | None = None,
-    q_trig: list[int] | None = None,
     q_mag_demodulated: list[int] | None = None,
     q_phi_demodulated: list[int] | None = None,
     center_frequencies_hz: np.ndarray | torch.Tensor | None = None,
     frame_rate: float | None = None,
 ) -> list[QuantizerSpec]:
-    """Build the default Cartesian, Polar, PredictivePolar, Trig, and DemodulatedPolar sweep."""
+    """Build the default Cartesian, Polar, PredictivePolar, and DemodulatedPolar sweep."""
     q_bits_cartesian = [4, 6, 8, 10] if q_bits_cartesian is None else q_bits_cartesian
     q_mag_polar = [4, 6, 8] if q_mag_polar is None else q_mag_polar
     q_phi_polar = [2, 4, 6, 8] if q_phi_polar is None else q_phi_polar
     q_mag_predictive = q_mag_polar if q_mag_predictive is None else q_mag_predictive
     q_phi_predictive = q_phi_polar if q_phi_predictive is None else q_phi_predictive
-    q_mag_trig = q_mag_polar if q_mag_trig is None else q_mag_trig
-    q_trig = q_phi_polar if q_trig is None else q_trig
     q_mag_demodulated = q_mag_polar if q_mag_demodulated is None else q_mag_demodulated
     q_phi_demodulated = q_phi_polar if q_phi_demodulated is None else q_phi_demodulated
 
@@ -105,23 +101,13 @@ def default_quantizer_specs(
             )
         )
 
-    # for qm, qp in product(q_mag_predictive, q_phi_predictive):
-    #     specs.append(
-    #         QuantizerSpec(
-    #             family="predictive",
-    #             config=(qm, qp),
-    #             label=f"Pred({qm},{qp})",
-    #             make_quantizer=lambda qm=qm, qp=qp: PredictivePolarQuant(q_mag=qm, q_phi=qp),
-    #         )
-    #     )
-
-    for qm, qt in product(q_mag_trig, q_trig):
+    for qm, qp in product(q_mag_predictive, q_phi_predictive):
         specs.append(
             QuantizerSpec(
-                family="trig",
-                config=(qm, qt),
-                label=f"Trig({qm},{qt},{qt})",
-                make_quantizer=lambda qm=qm, qt=qt: TrigMuLawQuant(q_mag=qm, q_trig=qt),
+                family="predictive",
+                config=(qm, qp),
+                label=f"Pred({qm},{qp})",
+                make_quantizer=lambda qm=qm, qp=qp: PredictivePolarQuant(q_mag=qm, q_phi=qp),
             )
         )
 
@@ -218,8 +204,6 @@ def run_benchmark(
     q_phi_polar: list[int] | None = None,
     q_mag_predictive: list[int] | None = None,
     q_phi_predictive: list[int] | None = None,
-    q_mag_trig: list[int] | None = None,
-    q_trig: list[int] | None = None,
     q_mag_demodulated: list[int] | None = None,
     q_phi_demodulated: list[int] | None = None,
     quantizer_specs: list[QuantizerSpec] | None = None,
@@ -237,8 +221,6 @@ def run_benchmark(
             q_phi_polar=q_phi_polar,
             q_mag_predictive=q_mag_predictive,
             q_phi_predictive=q_phi_predictive,
-            q_mag_trig=q_mag_trig,
-            q_trig=q_trig,
             q_mag_demodulated=q_mag_demodulated,
             q_phi_demodulated=q_phi_demodulated,
             center_frequencies_hz=center_frequencies_hz,
@@ -283,8 +265,7 @@ def plot_heatmaps(results: dict, n_bins: int, scale:str, metric: str = "si_sdr")
     Produces two figures:
       1. 2D heatmap of polar (q_mag x q_phi)
       2. Optional 2D heatmap of predictive polar (q_mag x q_phi)
-      3. Optional 2D heatmap of trig (q_mag x q_trig)
-      4. Bar chart comparing quantizers at the same total bits
+      3. Bar chart comparing cartesian diagonal vs best polar/predictive at same total bits
     """
     import matplotlib.pyplot as plt
     import matplotlib.ticker as ticker
@@ -294,14 +275,12 @@ def plot_heatmaps(results: dict, n_bins: int, scale:str, metric: str = "si_sdr")
 
     polar = results.get("polar", {})
     predictive = results.get("predictive", {})
-    trig = results.get("trig", {})
     demodulated = results.get("demodulated", {})
     cart  = results.get("cartesian", {})
 
     heatmap_specs = [
         ("Polar", polar),
         ("Predictive polar", predictive),
-        ("Trig", trig),
         ("Demodulated polar", demodulated),
     ]
     heatmaps = []
@@ -322,7 +301,7 @@ def plot_heatmaps(results: dict, n_bins: int, scale:str, metric: str = "si_sdr")
         im = ax.imshow(values, aspect="auto", origin="lower", cmap="RdYlGn")
         ax.set_xticks(range(len(q_phis)));  ax.set_xticklabels(q_phis)
         ax.set_yticks(range(len(q_mags)));  ax.set_yticklabels(q_mags)
-        ax.set_xlabel("q_trig (cos/sin bits)" if title == "Trig" else "q_phi (phase bits)")
+        ax.set_xlabel("q_phi (phase bits)")
         ax.set_ylabel("q_mag (magnitude bits)")
         ax.set_title(f"{title} — heatmap")
         plt.colorbar(im, ax=ax, label=label)
@@ -334,19 +313,17 @@ def plot_heatmaps(results: dict, n_bins: int, scale:str, metric: str = "si_sdr")
                         fontsize=8, color="black")
 
     # ---- figure 2: iso-budget comparison ----
-    # for each total bit budget B, find the best config by family and compare
+    # for each total bit budget B = q_mag + q_phi, find best polar/predictive/demodulated config
     # and compare against cartesian with q = B/2.
     ax2 = axes[-1]
 
     budgets = sorted(
         set(k[0] + k[1] for k in polar)
         | set(k[0] + k[1] for k in predictive)
-        | set(k[0] + 2 * k[1] for k in trig)
         | set(k[0] + k[1] for k in demodulated)
     )
     polar_best = []
     predictive_best = []
-    trig_best = []
     demodulated_best = []
     cart_vals  = []
     x_labels   = []
@@ -354,15 +331,12 @@ def plot_heatmaps(results: dict, n_bins: int, scale:str, metric: str = "si_sdr")
     for B in budgets:
         configs = [(qm, qp) for (qm, qp) in polar if qm + qp == B]
         best_val = max((polar[(qm, qp)][metric] for (qm, qp) in configs), default=float("nan"))
+        best_cfg = max(configs, key=lambda k: polar[k][metric]) if configs else None
         polar_best.append(best_val)
 
         pred_configs = [(qm, qp) for (qm, qp) in predictive if qm + qp == B]
         pred_val = max((predictive[(qm, qp)][metric] for (qm, qp) in pred_configs), default=float("nan"))
         predictive_best.append(pred_val)
-
-        trig_configs = [(qm, qt) for (qm, qt) in trig if qm + 2 * qt == B]
-        trig_val = max((trig[(qm, qt)][metric] for (qm, qt) in trig_configs), default=float("nan"))
-        trig_best.append(trig_val)
 
         demod_configs = [(qm, qp) for (qm, qp) in demodulated if qm + qp == B]
         demod_val = max((demodulated[(qm, qp)][metric] for (qm, qp) in demod_configs), default=float("nan"))
@@ -372,28 +346,24 @@ def plot_heatmaps(results: dict, n_bins: int, scale:str, metric: str = "si_sdr")
         q = B // 2
         c_val = cart.get((q, q), {}).get(metric, float("nan"))
         cart_vals.append(c_val)
-        x_labels.append(f"B={B}\ncart q={q}")
+        cfg_label = f"({best_cfg[0]},{best_cfg[1]})" if best_cfg else "n/a"
+        x_labels.append(f"B={B}\nbest polar\n{cfg_label}\nvs cart q={q}")
 
     x = np.arange(len(budgets))
-    series = []
-    if polar:
-        series.append(("Polar (best config)", polar_best, "steelblue"))
+    has_demod = bool(demodulated)
+    w = 0.2 if has_demod and predictive else 0.25 if predictive or has_demod else 0.35
+    ax2.bar(x - w, polar_best, w, label="Polar (best config)", color="steelblue")
     if predictive:
-        series.append(("Predictive (best config)", predictive_best, "seagreen"))
-    if trig:
-        series.append(("Trig (best config)", trig_best, "darkorange"))
-    if demodulated:
-        series.append(("Demodulated (best config)", demodulated_best, "mediumpurple"))
-    series.append(("Cartesian (q=B/2)", cart_vals, "tomato"))
-
-    w = min(0.8 / len(series), 0.22)
-    for idx, (name, values, color) in enumerate(series):
-        offset = (idx - (len(series) - 1) / 2) * w
-        ax2.bar(x + offset, values, w, label=name, color=color)
+        ax2.bar(x, predictive_best, w, label="Predictive (best config)", color="seagreen")
+    if has_demod:
+        demod_x = x + w if predictive else x
+        ax2.bar(demod_x, demodulated_best, w, label="Demodulated (best config)", color="mediumpurple")
+    cart_x = x + (2 * w if has_demod and predictive else w)
+    ax2.bar(cart_x, cart_vals, w, label="Cartesian (q=B/2)", color="tomato")
     ax2.set_xticks(x)
     ax2.set_xticklabels(x_labels, fontsize=7)
     ax2.set_ylabel(label)
-    ax2.set_title("Best quantizers — same bit budget")
+    ax2.set_title("Polar best vs Cartesian — same bit budget")
     ax2.legend()
     ax2.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.1f"))
     ax2.grid(axis="y", alpha=0.3)
