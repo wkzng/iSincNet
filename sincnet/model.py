@@ -8,7 +8,7 @@ import warnings
 import numpy as np
 from dataclasses import dataclass, asdict
 from .cgdecoder import frame_pseudo_inverse
-from .mulaw import DemodulatedPolarQuant, MuLawQuant, PolarMuLawQuant, PredictivePolarQuant
+from .mulaw import DemodulatedPolarQuant, MuLawQuant, PolarMuLawQuant, PredictivePolarQuant, TrigMuLawQuant
 
 
 
@@ -456,7 +456,7 @@ class FastAnalyticDecoder1d(nn.Module):
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
     def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128,
-                 q_bits:int=6, causal:bool=True, apply_sinc_envelope:bool=True,
+                 q_bits:int=6, mulaw_pre_scaling:bool=False, causal:bool=True, apply_sinc_envelope:bool=True,
                  decoder_type:str="fast", cg_iters:int=128):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
@@ -465,6 +465,7 @@ class SincNet(nn.Module):
             component:str : real/complex with real producing a the cos transform while complex produce the cos ans sin transforms
             n_bins: int : number of freauency bins to generate
             q_bits: int : number of bits used by the spectrogram quantizer
+            mulaw_pre_scaling: bool : whether to pre-scale the input signal to [-1,1] before applying the quantizer or not
             causal: bool : enforce or not causality on filters
             apply_sinc_envelope: bool : whether to apply the sinc envelope to the kernels or not (see section 2.1 of https://arxiv.org/pdf/1910.10400.pdf for more details)
             decoder_type: str : reconstruction decoder (all share the same encode/decode API, all length-exact):
@@ -499,26 +500,31 @@ class SincNet(nn.Module):
             self.decoder = AnalyticDecoder1d(self.config, self.encoder, n_iter=cg_iters)
         else:
             self.decoder = Decoder1d(self.config)
-        self.initialise_mulaw(coordinate_system="polar", q_bits=q_bits)
+        self.initialise_mulaw(coordinate_system="polar", q_bits=q_bits, pre_scaling=mulaw_pre_scaling)
 
-    def initialise_mulaw(self, coordinate_system: str = "polar", q_bits: int = 6) -> nn.Module:
+    def initialise_mulaw(self, coordinate_system: str = "polar", q_bits: int = 6, pre_scaling:bool=False) -> nn.Module:
         """Initialise the spectrogram quantizer."""
         coordinate_system = coordinate_system.lower()
         if coordinate_system == "polar":
-            self.mulaw = PolarMuLawQuant(q_bits=q_bits)
+            self.mulaw = PolarMuLawQuant(q_bits=q_bits, pre_scaling=pre_scaling)
         elif coordinate_system in ("predictive", "predictive_polar"):
-            self.mulaw = PredictivePolarQuant(q_bits=q_bits)
+            self.mulaw = PredictivePolarQuant(q_bits=q_bits, pre_scaling=pre_scaling)
         elif coordinate_system in ("demodulated", "demodulated_polar"):
             center_frequencies_hz, _ = scale_freqs(self.config.fs, self.config.n_bins, self.config.scale)
             self.mulaw = DemodulatedPolarQuant(
                 center_frequencies_hz=center_frequencies_hz,
                 frame_rate=self.config.fps,
                 q_bits=q_bits,
+                pre_scaling=pre_scaling
             )
+        elif coordinate_system in ("trig", "trigonometric"):
+            self.mulaw = TrigMuLawQuant(q_bits=q_bits, pre_scaling=pre_scaling)
         elif coordinate_system in ("cartesian", "cartesien"):
-            self.mulaw = MuLawQuant(q_bits=q_bits)
+            self.mulaw = MuLawQuant(q_bits=q_bits, pre_scaling=pre_scaling)
         else:
-            raise ValueError("coordinate_system must be 'polar', 'predictive', 'demodulated', or 'cartesian'")
+            raise ValueError(
+                "coordinate_system must be 'polar', 'predictive', 'demodulated', 'trig', or 'cartesian'"
+            )
         return self.mulaw
 
     def load_pretrained_weights(self, weights_folder:str|None=None, freeze:bool=True, device:str="cpu", strict:bool=False, verbose:bool=False) -> None:

@@ -307,6 +307,99 @@ class PolarMuLawQuant(nn.Module):
         return self.expand(torch.stack([magnitude, phase], dim=1), scale=scale)
 
 
+class TrigMuLawQuant(PolarMuLawQuant):
+    """
+    Trigonometric quantizer for complex spectrograms stored as (B, 2, F, T).
+
+    Magnitude: mu-law companded, quantized to q_mag bits.
+    Direction: cos(phase) and sin(phase), each uniformly quantized to q_trig bits.
+
+    quantize() returns (tokens, scale)
+        tokens ~ (B, 3, F, T) int64, with channels magnitude, cos, sin
+        scale  ~ (B, 1, 1, 1) float
+
+    dequantize() returns x_hat ~ (B, 2, F, T) float.
+    """
+
+    def __init__(
+        self,
+        q_mag: int | None = None,
+        q_trig: int | None = None,
+        q_bits: int = 8,
+        eps: float = 1e-8,
+        dither: bool = False,
+        pre_scaling: bool = True,
+    ):
+        q_mag = q_bits if q_mag is None else q_mag
+        q_trig = q_bits if q_trig is None else q_trig
+        super().__init__(
+            q_mag=q_mag,
+            q_phi=q_trig,
+            q_bits=q_bits,
+            eps=eps,
+            dither=dither,
+            pre_scaling=pre_scaling,
+        )
+        self.q_trig = q_trig
+        self.trig_vocab_size = 2 ** q_trig
+        self.n_trig = self.trig_vocab_size
+
+    @staticmethod
+    def _split_trig_channels(x: torch.Tensor, name: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if x.ndim != 4 or x.shape[1] != 3:
+            raise ValueError(f"Expected {name} shaped (B, 3, F, T), got {tuple(x.shape)}")
+        return x[:, 0], x[:, 1], x[:, 2]
+
+    def compand(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert a complex spectrogram to continuous magnitude/cos/sin values."""
+        self._validate_complex_input(x)
+        real = x[:, 0]
+        imag = x[:, 1]
+
+        magnitude = torch.sqrt(real**2 + imag**2)
+        scale = get_scale(magnitude, eps=self.eps, pre_scaling=self.pre_scaling)
+        magnitude_scaled = magnitude / self._scale_for_magnitude(scale)
+        magnitude_companded = self.compand_magnitude(magnitude_scaled)
+
+        direction_norm = torch.clamp(magnitude, min=self.eps)
+        cos_phase = real / direction_norm
+        sin_phase = imag / direction_norm
+
+        return torch.stack([magnitude_companded, cos_phase, sin_phase], dim=1), scale
+
+    def expand(self, x: torch.Tensor, scale: torch.Tensor | float = 1.0) -> torch.Tensor:
+        """Reconstruct a complex spectrogram from continuous magnitude/cos/sin values."""
+        magnitude, cos_phase, sin_phase = self._split_trig_channels(x, "trigonometric tensor")
+
+        magnitude = self.expand_magnitude(magnitude) * self._scale_for_magnitude(scale)
+        direction_norm = torch.sqrt(cos_phase**2 + sin_phase**2).clamp_min(self.eps)
+
+        real = magnitude * cos_phase / direction_norm
+        imag = magnitude * sin_phase / direction_norm
+        return torch.stack([real, imag], dim=1)
+
+    def quantize(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize a complex spectrogram as magnitude, cos(phase), and sin(phase)."""
+        x, scale = self.compand(x)
+        magnitude, cos_phase, sin_phase = self._split_trig_channels(x, "trigonometric tensor")
+        mag_tokens = quantize_unit(magnitude, self.mag_vocab_size, add_noise=self.dither)
+        cos_tokens = quantize_unit((cos_phase + 1.0) / 2.0, self.trig_vocab_size, add_noise=self.dither)
+        sin_tokens = quantize_unit((sin_phase + 1.0) / 2.0, self.trig_vocab_size, add_noise=self.dither)
+        return torch.stack([mag_tokens, cos_tokens, sin_tokens], dim=1), scale
+
+    def dequantize(self, x: torch.Tensor, scale: torch.Tensor | float = 1.0) -> torch.Tensor:
+        """Reconstruct a complex spectrogram from stacked magnitude/cos/sin tokens."""
+        mag_tokens, cos_tokens, sin_tokens = self._split_trig_channels(x, "token tensor")
+        magnitude = dequantize_unit(mag_tokens, self.mag_vocab_size)
+        cos_phase = 2.0 * dequantize_unit(cos_tokens, self.trig_vocab_size) - 1.0
+        sin_phase = 2.0 * dequantize_unit(sin_tokens, self.trig_vocab_size) - 1.0
+        return self.expand(torch.stack([magnitude, cos_phase, sin_phase], dim=1), scale=scale)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        tokens, scale = self.quantize(x)
+        return self.dequantize(tokens, scale)
+
+
 class PredictivePolarQuant(PolarMuLawQuant):
     """
     Polar quantizer with predictive phase tokens.
