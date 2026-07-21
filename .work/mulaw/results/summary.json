@@ -1,0 +1,98 @@
+{
+  "config": {
+    "sample_rate": 16000,
+    "fps": 128,
+    "n_bins": 128,
+    "scale": "lin",
+    "duration": 1.0,
+    "offset": 0.0,
+    "audio": [
+      "audio/invertibility/p232_001.wav",
+      "audio/invertibility/p232_002.wav"
+    ],
+    "q_mag": [
+      4,
+      6,
+      8
+    ],
+    "q_phi": [
+      4,
+      6
+    ]
+  },
+  "note": "centered uses one extra mean side-info scalar per sample in addition to scale",
+  "best": {
+    "si_sdr": {
+      "max": {
+        "strategy": "max",
+        "q_mag": 8,
+        "q_phi": 6,
+        "total_bits": 14,
+        "sdr": 25.860933661460876,
+        "si_sdr": 25.851334929466248,
+        "mag_sdr": 44.467012882232666,
+        "mag_mae": 5.118625949762645e-06,
+        "mag_rmse": 2.0352482351881918e-05
+      },
+      "centered": {
+        "strategy": "centered",
+        "q_mag": 8,
+        "q_phi": 6,
+        "total_bits": 14,
+        "sdr": 25.542110800743103,
+        "si_sdr": 25.558401346206665,
+        "mag_sdr": 38.239665031433105,
+        "mag_mae": 1.1268678917986108e-05,
+        "mag_rmse": 4.160243770456873e-05
+      }
+    },
+    "sdr": {
+      "max": {
+        "strategy": "max",
+        "q_mag": 8,
+        "q_phi": 6,
+        "total_bits": 14,
+        "sdr": 25.860933661460876,
+        "si_sdr": 25.851334929466248,
+        "mag_sdr": 44.467012882232666,
+        "mag_mae": 5.118625949762645e-06,
+        "mag_rmse": 2.0352482351881918e-05
+      },
+      "centered": {
+        "strategy": "centered",
+        "q_mag": 8,
+        "q_phi": 6,
+        "total_bits": 14,
+        "sdr": 25.542110800743103,
+        "si_sdr": 25.558401346206665,
+        "mag_sdr": 38.239665031433105,
+        "mag_mae": 1.1268678917986108e-05,
+        "mag_rmse": 4.160243770456873e-05
+      }
+    },
+    "mag_sdr": {
+      "max": {
+        "strategy": "max",
+        "q_mag": 8,
+        "q_phi": 6,
+        "total_bits": 14,
+        "sdr": 25.860933661460876,
+        "si_sdr": 25.851334929466248,
+        "mag_sdr": 44.467012882232666,
+        "mag_mae": 5.118625949762645e-06,
+        "mag_rmse": 2.0352482351881918e-05
+      },
+      "centered": {
+        "strategy": "centered",
+        "q_mag": 8,
+        "q_phi": 4,
+        "total_bits": 12,
+        "sdr": 19.088372588157654,
+        "si_sdr": 19.046993851661682,
+        "mag_sdr": 38.23966860771179,
+        "mag_mae": 1.1268678008491406e-05,
+        "mag_rmse": 4.160241951467469e-05
+      }
+    }
+  }
+}
