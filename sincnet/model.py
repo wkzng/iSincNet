@@ -206,7 +206,7 @@ def scale_freqs(fs:int, n_bins:int, scale:str) -> tuple[np.ndarray, np.ndarray]:
 
 
 
-def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causal:bool, apply_sinc_envelope:bool=False) -> torch.Tensor:
+def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causal:bool, apply_sinc_envelope:bool=False) -> list[torch.Tensor]:
     """ Compute real and imaginary part of sinc kernels
             r(x) = 2a*sinc(ax) - 2b*sinc(bx)  with x=2πt
 
@@ -248,7 +248,7 @@ def compute_complex_kernel(kernel_size:int, fs:int, n_bins:int, scale:str, causa
     #normalise the kernel
     weights = vibrations * envelope * window
     weights = weights / torch.sum(weights.abs(), dim=1).max().item()
-    return weights
+    return weights, freq_hz
 
 
 
@@ -258,7 +258,7 @@ class Encoder1d(nn.Module):
         self.stride = config.hop_length
         self.padding = config.kernel_size // 2
         self.component = config.component
-        filters = compute_complex_kernel(
+        filters, freq_hz = compute_complex_kernel(
             kernel_size=config.kernel_size,
             fs=config.fs,
             n_bins=config.n_bins,
@@ -267,10 +267,14 @@ class Encoder1d(nn.Module):
             apply_sinc_envelope=config.apply_sinc_envelope
         )
         filters = self.preprocess_filters(filters)
+        self.freq_hz = torch.from_numpy(freq_hz).float()
         self.register_buffer("filters", filters.unsqueeze(1))
         if self.component == "complex":
             self.register_buffer("filters_cat", torch.cat([self.filters.real, self.filters.imag], dim=0))
 
+    def get_frequencies(self) -> torch.Tensor: 
+        """Return the centre frequencies of the filters in Hz"""
+        return self.freq_hz
 
     def preprocess_filters(self, filters:torch.Tensor) -> torch.Tensor: 
         """ Pre-normalise the filters so that max spectrogram value <= 1"""
@@ -284,7 +288,6 @@ class Encoder1d(nn.Module):
 
         norm = weights.abs().sum(dim=-1, keepdim=True)
         return filters / norm
-
 
     def forward(self, wav:torch.Tensor) -> torch.Tensor: 
         """(B,L) or (B,1,L) → (B,C,F,T) with C=1 for real/imag and C=2 for complex"""
@@ -562,6 +565,10 @@ class SincNet(nn.Module):
             if save_path is not None:
                 fig.savefig(os.path.join(save_path, f"kernel_{i}.png"))
 
+    def get_frequencies(self) -> torch.Tensor: 
+        """Return the centre frequencies of the filters in Hz"""
+        return self.encoder.get_frequencies()
+    
     @torch.no_grad()
     def magnitude(self, spectrogram:torch.Tensor) -> torch.Tensor:
         """Compute the magnitude spectrogram ~ (B,1,F,T) on the input signal"""
