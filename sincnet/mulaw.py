@@ -108,6 +108,33 @@ def get_scale(magnitude: torch.Tensor, eps: float = 1e-8, pre_scaling: bool = Tr
     return scale
 
 
+def create_mulaw(coordinate_system: str, q_bits: int, pre_scaling: bool,
+                 center_frequencies_hz, frame_rate: float, **kwargs) -> nn.Module:
+    """Create a quantizer using the frontend's frequency and frame geometry.
+
+    Extra keyword arguments are forwarded to the selected quantizer, which
+    validates its supported settings (q_mag, q_phi/q_trig, eps, dither, etc.).
+    """
+    coordinate_system = coordinate_system.lower()
+    quantizers = {
+        "cartesian": MuLawQuant, "cartesien": MuLawQuant,
+        "polar": PolarMuLawQuant,
+        "predictive": PredictivePolarQuant, "predictive_polar": PredictivePolarQuant,
+        "demodulated": DemodulatedPolarQuant, "demodulated_polar": DemodulatedPolarQuant,
+        "trig": TrigMuLawQuant, "trigonometric": TrigMuLawQuant,
+    }
+    if coordinate_system not in quantizers:
+        raise ValueError(
+            "coordinate_system must be 'polar', 'predictive', 'demodulated', 'trig', or 'cartesian'"
+        )
+    quantizer = quantizers[coordinate_system]
+    if quantizer is DemodulatedPolarQuant:
+        return quantizer(center_frequencies_hz=center_frequencies_hz,
+                         frame_rate=frame_rate, q_bits=q_bits,
+                         pre_scaling=pre_scaling, **kwargs)
+    return quantizer(q_bits=q_bits, pre_scaling=pre_scaling, **kwargs)
+
+
 class MuLawQuant(nn.Module):
     def __init__(
         self,

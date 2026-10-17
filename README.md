@@ -56,6 +56,82 @@ with torch.no_grad():
 
 See the [demo notebook](demo_sincnet.ipynb).
 
+### Select STFT or SincNet from a dictionary
+
+```python
+from sincnet import create_spectrogram_transform
+
+params = dict(spec_type="stft", fs=16000, fps=128, n_bins=256,
+              q_bits=8, overlap=4, scale="lin", causal=False)
+frontend = create_spectrogram_transform(params)
+spec = frontend.encode(wav)  # (B, 2, 256, 129) for (B, 16000) input
+
+params["spec_type"] = "sincnet"
+frontend = create_spectrogram_transform(params)
+spec = frontend.encode(wav)  # same shape
+```
+
+The factory accepts mono `(B, L)` or `(B, 1, L)` waveforms and returns real/imaginary
+channels with `F = n_bins` and `T = 1 + L // (fs // fps)` for either backend.
+`fs` must be divisible by `fps`. It selects SincNet's `component="complex"` and
+STFT's `layout="channel"`; conflicting settings are rejected. Direct constructors
+still support their existing layouts. The dictionary is copied, and unknown keys
+are rejected. Options for the other backend are ignored, so changing `spec_type`
+is sufficient: `overlap` applies to STFT; `scale`, `causal`, `apply_sinc_envelope`,
+`decoder_type`, and `cg_iters` apply to SincNet. Matching shapes
+do not imply matching frequency scales, coefficient values, or reconstruction accuracy.
+
+STFT's `overlap` sets `win_length = overlap * hop_length`, with
+`hop_length = fs // fps` and `n_fft = 2 * n_bins`. It does **not** change the output
+shape. Overlap 2 gives 50% window overlap; 4 gives 75%. A longer window averages
+over more time and offers finer effective frequency discrimination at the cost of
+temporal localization. It also changes overlap-add reconstruction behavior. The
+window must fit inside the FFT: `overlap * hop_length <= 2 * n_bins`. At 16 kHz
+and 128 fps, overlap 4 therefore requires at least 256 bins. SincNet uses its own
+fixed kernel duration; this option does not change it. STFT drops the Nyquist bin,
+so reconstruction is approximate even with a suitable window. Pass the original
+waveform length to `decode` to preserve lengths that are not multiples of the hop.
+
+SincNet now retains the right boundary frame for hop-aligned inputs, adding one
+frame compared with earlier versions. Its analytical decoders default to
+`(T - 1) * hop_length` samples, matching STFT; the learned decoder still emits
+`T * hop_length` samples. Existing saved spectrograms and learned-decoder pipelines
+may need their framing assumptions updated.
+
+Both frontends accept the same quantizer configuration through their constructors
+and the factory:
+
+```python
+params.update(
+    q_bits=8,
+    mulaw_kwargs=dict(coordinate_system="demodulated", pre_scaling=True,
+                      q_mag=8, q_phi=6, eps=1e-8, dither=False),
+)
+frontend = create_spectrogram_transform(params)
+tokens, scale = frontend.mulaw.quantize(frontend.encode(wav))
+reconstructed_spec = frontend.mulaw.dequantize(tokens, scale)
+```
+
+`mulaw_kwargs["coordinate_system"]` supports `cartesian`, `polar`, `predictive`,
+`demodulated`, and `trig` (and the existing aliases). `mulaw_kwargs` forwards
+settings supported by the chosen quantizer (`q_bits` overrides the top-level
+default; `pre_scaling` controls magnitude normalization before companding): `q_mag` and `q_phi` for
+polar variants, `q_mag` and `q_trig` for trig, `eps` and `dither` for all, and
+`mag_silence_threshold` for polar/predictive. Unsupported settings raise an error.
+Demodulation frequencies and frame rate come from the frontend automatically;
+STFT uses `k * fs / n_fft`, while SincNet uses its filter centers.
+
+The factory defaults to 6-bit polar quantization with pre-scaling disabled for
+both transforms. Direct constructor defaults remain unchanged: STFT uses 8-bit
+Cartesian with pre-scaling enabled; SincNet uses 6-bit polar with pre-scaling
+disabled. Both also support
+`frontend.initialise_mulaw("polar", q_bits=8, pre_scaling=True, q_phi=6)` to replace
+the quantizer after construction. Quantizers expect real/imaginary channel
+spectrograms `(B, 2, F, T)`; trig produces three token channels and restores two
+when dequantizing. With STFT's direct `layout="complex"`, convert the spectrum to
+real/imaginary channels before quantization. The factory always selects channel
+layout.
+
 ## Decoders
 
 All share the same `encode` / `decode` API and are length-exact (pick via `decoder_type`):

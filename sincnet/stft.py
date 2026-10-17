@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 
-from .mulaw import MuLawQuant
+from .mulaw import create_mulaw
 
 
 
@@ -29,16 +30,22 @@ def stft_params(fs:int, fps:int, n_bins:int, overlap:int=2) -> dict:
 
 class STFT(nn.Module):
     """Exactly-invertible STFT frontend sharing the SincNet encode/decode API"""
-    def __init__(self, fs:int=16000, fps:int=128, n_bins:int=128, overlap:int=2,
-                 q_bits:int=8, layout:str="channel"):
+    def __init__(
+        self, fs:int=16000, fps:int=128, n_bins:int=128, overlap:int=2,
+        q_bits:int=8, layout:str="channel", mulaw_kwargs:dict|None=None
+    ):
         """ STFT transform parametrised by the two axes you actually control
             fs: int : sample rate of the input signal
             fps: int : frames per second of the spectrogram (fps = fs / hop)
             n_bins: int : number of frequency bins (the highest/Nyquist bin is dropped
                           so the bin axis is exactly n_bins, ideally a power of two)
-            overlap: int : window overlap factor (2 -> 50%, 4 -> 75%) controlling invertibility
+            overlap: int : window overlap factor (2 -> 50%, 4 -> 75%). Changes window
+                           duration/time-frequency tradeoff, not F or T; overlap*hop <= n_fft.
             q_bits: int : number of bits used by the spectrogram quantizer
             layout: str : channel -> (B,2,F,T) real (real,imag) | complex -> (B,F,T) complex
+            mulaw_kwargs: dict : quantizer options including coordinate_system (default cartesian),
+                pre_scaling (default True), q_mag, q_phi/q_trig, eps, dither, etc.; overrides q_bits
+                Quantizers operate on the (B,2,F,T) real/imag channel representation.
 
             Unlike the decimated SincNet filterbank the STFT overlap-adds with exact COLA
             normalisation: decode(encode(x)) ~= x with no aliasing and no horizontal stripes.
@@ -60,7 +67,26 @@ class STFT(nn.Module):
         self.name = f"{fs}fs_{fps}fps_{n_bins}bins_stft"
 
         self.register_buffer("window", torch.hann_window(self.win_length))
-        self.mulaw = MuLawQuant(q_bits=q_bits)
+        quantizer_options = dict(coordinate_system="cartesian", q_bits=q_bits, pre_scaling=True)
+        quantizer_options.update(mulaw_kwargs or {})
+        self.initialise_mulaw(**quantizer_options)
+
+    def initialise_mulaw(self, coordinate_system: str = "polar", q_bits: int = 6, pre_scaling: bool = False, **kwargs) -> nn.Module:
+        """ Configure the quantizer using the retained FFT bins' frequencies.
+            Extra options go to the selected quantizer. For complex layout, convert
+            to real/imag channels before passing a spectrogram to the quantizer.
+        """
+        centers = torch.arange(self.n_bins, device=self.window.device) * (self.fs / self.n_fft)
+        self.mulaw = create_mulaw(
+            coordinate_system, q_bits, pre_scaling,
+            center_frequencies_hz=centers, frame_rate=self.fps, **kwargs,
+        ).to(self.window.device)
+        return self.mulaw
+
+    def load_pretrained_weights(self, weights_folder:str|None=None, freeze:bool=True,
+                                device:str="cpu", strict:bool=False, verbose:bool=False) -> "STFT":
+        """Return self for SincNet API compatibility; STFT needs no pretrained weights."""
+        return self
 
     def _as_waveform(self, wav:torch.Tensor) -> torch.Tensor:
         """(L,) or (B,L) or (B,1,L) -> (B,L)"""
@@ -92,11 +118,10 @@ class STFT(nn.Module):
 
         With center=True, T frames naturally cover (T - 1) hops; default to that when no explicit
         length is given."""
-        B, _, T = spectrum.shape
+        T = spectrum.shape[-1]
         if length is None:
             length = (T - 1) * self.hop_length
-        full = spectrum.new_zeros((B, self.n_fft // 2 + 1, T))
-        full[:, :self.n_bins] = spectrum
+        full = F.pad(spectrum, (0, 0, 0, 1))
         return torch.istft(
             full, self.n_fft, self.hop_length, self.win_length,
             window=self.window, center=True, length=length
