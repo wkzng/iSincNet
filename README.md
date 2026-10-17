@@ -81,6 +81,11 @@ is sufficient: `overlap` applies to STFT; `scale`, `causal`, `apply_sinc_envelop
 `decoder_type`, and `cg_iters` apply to SincNet. Matching shapes
 do not imply matching frequency scales, coefficient values, or reconstruction accuracy.
 
+STFT currently uses linear FFT bins; the factory ignores `scale` for STFT.
+Experimental mel/Bark/ERB projections passed initial round-trip checks, but
+additional listening tests produced strident reconstruction artifacts. Projection
+support was removed pending further investigation; use SincNet for nonlinear scales.
+
 STFT's `overlap` sets `win_length = overlap * hop_length`, with
 `hop_length = fs // fps` and `n_fft = 2 * n_bins`. It does **not** change the output
 shape. Overlap 2 gives 50% window overlap; 4 gives 75%. A longer window averages
