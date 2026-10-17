@@ -8,7 +8,7 @@ import warnings
 import numpy as np
 from dataclasses import dataclass, asdict
 from .cgdecoder import frame_pseudo_inverse
-from .mulaw import DemodulatedPolarQuant, MuLawQuant, PolarMuLawQuant, PredictivePolarQuant, TrigMuLawQuant
+from .mulaw import create_mulaw
 
 
 
@@ -296,7 +296,9 @@ class Encoder1d(nn.Module):
         elif wav.size(1) != 1:
             raise ValueError("Expected mono waveform (B,1,L)")
         
-        wav = F.pad(wav, (self.padding, self.padding), mode="reflect")
+        # The odd kernel needs one extra right sample to retain the frame
+        # centered at L when L is hop-aligned, matching center=True STFT.
+        wav = F.pad(wav, (self.padding, self.padding + 1), mode="reflect")
         
         if self.component == "complex":
             spectrogram = F.conv1d(wav, self.filters_cat, stride=self.stride)
@@ -362,7 +364,7 @@ class AnalyticDecoder1d(nn.Module):
     def forward(self, spec:torch.Tensor, length:int|None=None) -> torch.Tensor:
         """Map ``(B,C,F,T)`` coefficients to an exact-length waveform."""
         if length is None:
-            length = spec.shape[-1] * self.config.hop_length
+            length = (spec.shape[-1] - 1) * self.config.hop_length
         return frame_pseudo_inverse(spec, self._encoder[0], length, self.n_iter, self.tol, self.reg)
 
 
@@ -450,7 +452,7 @@ class FastAnalyticDecoder1d(nn.Module):
         # The encoder reflect-pads the input by `padding` before the strided conv, so the valid
         # reconstruction sits at [padding : padding+length] of the (padding-free) transpose output.
         if length is None:
-            length = spec.shape[-1] * self.stride
+            length = (spec.shape[-1] - 1) * self.stride
         x_hat = x_hat[..., self.padding : self.padding + length]
         return x_hat
 
@@ -459,8 +461,10 @@ class FastAnalyticDecoder1d(nn.Module):
 class SincNet(nn.Module):
     """Custom mixed time and frequency trasnform """
     def __init__(self, fs:int=16000, fps:int=128, scale:str="lin", component:str="real", n_bins:int=128,
-                 q_bits:int=6, mulaw_pre_scaling:bool=False, causal:bool=True, apply_sinc_envelope:bool=True,
-                 decoder_type:str="fast", cg_iters:int=128):
+        q_bits:int=6, causal:bool=True, apply_sinc_envelope:bool=True,
+        decoder_type:str="fast", cg_iters:int=128,
+        mulaw_kwargs:dict|None=None
+    ):
         """ STFT-like transform using the SincNet framework with added flexibility
             fs: int : sample rate of the input signal
             fps: int: number of frequency bins in the final 2D spectrogram
@@ -468,7 +472,6 @@ class SincNet(nn.Module):
             component:str : real/complex with real producing a the cos transform while complex produce the cos ans sin transforms
             n_bins: int : number of freauency bins to generate
             q_bits: int : number of bits used by the spectrogram quantizer
-            mulaw_pre_scaling: bool : whether to pre-scale the input signal to [-1,1] before applying the quantizer or not
             causal: bool : enforce or not causality on filters
             apply_sinc_envelope: bool : whether to apply the sinc envelope to the kernels or not (see section 2.1 of https://arxiv.org/pdf/1910.10400.pdf for more details)
             decoder_type: str : reconstruction decoder (all share the same encode/decode API, all length-exact):
@@ -476,6 +479,8 @@ class SincNet(nn.Module):
                 "exact"  -> AnalyticDecoder1d: conjugate-gradient pseudo-inverse, ~120 dB, no weights, slower,
                             DIFFERENTIABLE via implicit backward (usable in training, e.g. source separation)
                 "learnt" -> Decoder1d: small trained overlap-add conv (requires a checkpoint)
+            mulaw_kwargs: dict : quantizer options including coordinate_system (default polar),
+                pre_scaling (default False), q_mag, q_phi/q_trig, eps, dither, etc.; overrides q_bits
             cg_iters: int : maximum CG iterations used by the exact decoder
         """
         super().__init__()
@@ -503,31 +508,18 @@ class SincNet(nn.Module):
             self.decoder = AnalyticDecoder1d(self.config, self.encoder, n_iter=cg_iters)
         else:
             self.decoder = Decoder1d(self.config)
-        self.initialise_mulaw(coordinate_system="polar", q_bits=q_bits, pre_scaling=mulaw_pre_scaling)
+        quantizer_options = dict(coordinate_system="polar", q_bits=q_bits,
+                                 pre_scaling=False)
+        quantizer_options.update(mulaw_kwargs or {})
+        self.initialise_mulaw(**quantizer_options)
 
-    def initialise_mulaw(self, coordinate_system: str = "polar", q_bits: int = 6, pre_scaling:bool=False) -> nn.Module:
-        """Initialise the spectrogram quantizer."""
-        coordinate_system = coordinate_system.lower()
-        if coordinate_system == "polar":
-            self.mulaw = PolarMuLawQuant(q_bits=q_bits, pre_scaling=pre_scaling)
-        elif coordinate_system in ("predictive", "predictive_polar"):
-            self.mulaw = PredictivePolarQuant(q_bits=q_bits, pre_scaling=pre_scaling)
-        elif coordinate_system in ("demodulated", "demodulated_polar"):
-            center_frequencies_hz, _ = scale_freqs(self.config.fs, self.config.n_bins, self.config.scale)
-            self.mulaw = DemodulatedPolarQuant(
-                center_frequencies_hz=center_frequencies_hz,
-                frame_rate=self.config.fps,
-                q_bits=q_bits,
-                pre_scaling=pre_scaling
-            )
-        elif coordinate_system in ("trig", "trigonometric"):
-            self.mulaw = TrigMuLawQuant(q_bits=q_bits, pre_scaling=pre_scaling)
-        elif coordinate_system in ("cartesian", "cartesien"):
-            self.mulaw = MuLawQuant(q_bits=q_bits, pre_scaling=pre_scaling)
-        else:
-            raise ValueError(
-                "coordinate_system must be 'polar', 'predictive', 'demodulated', 'trig', or 'cartesian'"
-            )
+    def initialise_mulaw(self, coordinate_system: str = "polar", q_bits: int = 6, pre_scaling: bool = False, **kwargs) -> nn.Module:
+        """Configure the quantizer; extra options go to its selected class."""
+        self.mulaw = create_mulaw(
+            coordinate_system, q_bits, pre_scaling,
+            center_frequencies_hz=self.encoder.get_frequencies(),
+            frame_rate=self.config.fps, **kwargs,
+        ).to(self.encoder.filters.device)
         return self.mulaw
 
     def load_pretrained_weights(self, weights_folder:str|None=None, freeze:bool=True, device:str="cpu", strict:bool=False, verbose:bool=False) -> None:
