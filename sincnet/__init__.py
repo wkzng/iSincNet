@@ -11,7 +11,8 @@ def create_spectrogram_transform(params: dict) -> STFT | SincNet:
     options belonging to the other backend are ignored. Quantization defaults
     to 6-bit polar with pre-scaling disabled for either backend.
     Unknown options and incompatible component/layout choices are rejected.
-    For mono (B, L) or (B, 1, L) input, T = 1 + L // (fs // fps).
+    For mono (B, L) or (B, 1, L), both use T = ceil(L / hop), hop = fs // fps.
+    STFT centers are shifted by floor(hop/2) samples relative to SincNet.
     STFT also requires overlap * (fs // fps) <= 2 * n_bins.
     The input dictionary is never modified.
     """

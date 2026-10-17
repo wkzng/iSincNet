@@ -64,8 +64,7 @@ def test_fps_matches_hop():
     for seconds in (1, 2, 3):
         L = fs * seconds
         spec = m.encode(torch.randn(L))
-        # center=True keeps the right boundary frame: T == 1 + L // hop.
-        assert spec.shape[-1] == 1 + L // m.hop_length == 1 + fps * seconds
+        assert spec.shape[-1] == L // m.hop_length == fps * seconds
 
 
 # ---- invertibility ----
@@ -122,7 +121,7 @@ def test_griffin_lim_improves_consistency():
     t = torch.linspace(0, 1, fs)
     x = 0.5 * torch.sin(2 * torch.pi * 220 * t).unsqueeze(0)
     target_mag = m.magnitude(m.encode(x))
-    length = (target_mag.shape[-1] - 1) * m.hop_length
+    length = target_mag.shape[-1] * m.hop_length
 
     def consistency(spec):
         return (m.magnitude(m.encode(m.decode(spec, length=length))) - target_mag).norm()
@@ -133,7 +132,7 @@ def test_griffin_lim_improves_consistency():
 
 
 def test_griffin_lim_has_no_boundary_spike():
-    """Dropping the centered right-boundary frame makes arbitrary phase explode at the last sample."""
+    """Shifted windows must keep modified-phase boundary samples stable."""
     fs = 16000
     m = STFT(fs=fs, fps=128, n_bins=128)
     t = torch.arange(fs).float() / fs

@@ -15,13 +15,13 @@ def test_factory_backend_shape_parity(length, mono_channel, overlap):
                   causal=False, apply_sinc_envelope=False, q_bits=8)
     original = params.copy()
     wav = torch.randn(2, 1, length) if mono_channel else torch.randn(2, length)
-    expected = (2, 2, 64, 1 + length // 32)
     for spec_type, cls in [("stft", STFT), ("sincnet", SincNet)]:
         config = dict(params, spec_type=spec_type)
         model = create_spectrogram_transform(config)
         assert isinstance(model, cls)
         spec = model.encode(wav)
-        assert spec.shape == expected
+        frames = (length + 31) // 32
+        assert spec.shape == (2, 2, 64, frames)
         assert not spec.is_complex()
         assert model.decode(spec, length=length).shape == (2, length)
         assert config == dict(original, spec_type=spec_type)
@@ -31,7 +31,8 @@ def test_factory_backend_shape_parity(length, mono_channel, overlap):
 def test_factory_defaults_have_two_channels():
     for spec_type in ("stft", "sincnet"):
         model = create_spectrogram_transform({"spec_type": spec_type})
-        assert model.encode(torch.randn(2, 1000)).shape == (2, 2, 128, 9)
+        frames = 8
+        assert model.encode(torch.randn(2, 1000)).shape == (2, 2, 128, frames)
 
 
 @pytest.mark.parametrize("spec_type,decoder", [
@@ -88,7 +89,8 @@ def test_factory_mulaw_configuration_and_roundtrip(spec_type, coordinate_system,
         assert getattr(quantizer, key) == value
     spec = model.encode(torch.randn(2, 1024))
     tokens, scale = quantizer.quantize(spec)
-    assert tokens.shape == (2, channels, 64, 33)
+    frames = 32
+    assert tokens.shape == (2, channels, 64, frames)
     reconstructed = quantizer.dequantize(tokens, scale)
     assert reconstructed.shape == spec.shape
     assert torch.isfinite(reconstructed).all()

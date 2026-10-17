@@ -12,7 +12,6 @@ training/tensorboard_logs
 logs/
 .work/
 datasets/compiled/
-Makefile
 *.png
 !docs/assets/comparison_output.png
 !docs/assets/window_hann_sqrt_comparison.png

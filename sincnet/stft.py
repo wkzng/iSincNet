@@ -29,7 +29,7 @@ def stft_params(fs:int, fps:int, n_bins:int, overlap:int=2) -> dict:
 
 
 class STFT(nn.Module):
-    """Exactly-invertible STFT frontend sharing the SincNet encode/decode API"""
+    """Half-hop STFT frontend sharing SincNet framing; Nyquist is omitted."""
     def __init__(
         self, fs:int=16000, fps:int=128, n_bins:int=128, overlap:int=2,
         q_bits:int=8, layout:str="channel", mulaw_kwargs:dict|None=None
@@ -47,8 +47,9 @@ class STFT(nn.Module):
                 pre_scaling (default True), q_mag, q_phi/q_trig, eps, dither, etc.; overrides q_bits
                 Quantizers operate on the (B,2,F,T) real/imag channel representation.
 
-            Unlike the decimated SincNet filterbank the STFT overlap-adds with exact COLA
-            normalisation: decode(encode(x)) ~= x with no aliasing and no horizontal stripes.
+            Frame centers are floor(hop/2) + t*hop, giving ceil(L/hop) frames.
+            Normalized overlap-add keeps shifted boundary windows stable. Dropping
+            Nyquist makes reconstruction approximate; default decode length is T*hop.
         """
         super().__init__()
         assert layout in ("channel", "complex")
@@ -64,6 +65,7 @@ class STFT(nn.Module):
         self.n_fft = params["n_fft"]
         self.win_length = params["win_length"]
         self.hop_length = params["hop_length"]
+        self.frame_offset = self.hop_length // 2
         self.name = f"{fs}fs_{fps}fps_{n_bins}bins_stft"
 
         self.register_buffer("window", torch.hann_window(self.win_length))
@@ -99,33 +101,49 @@ class STFT(nn.Module):
         raise ValueError("Expected mono waveform (L,), (B,L) or (B,1,L)")
 
     def _analysis(self, wav:torch.Tensor) -> torch.Tensor:
-        """(B,L) -> complex (B,F,T), dropping only the highest (Nyquist) bin.
+        """(B,L) -> complex (B,F,ceil(L/hop)), omitting Nyquist.
 
-        torch.stft(center=True) yields 1 + L//hop frames for hop-aligned signals. The final
-        frame is centered at sample L and mostly comes from reflection padding, but keeping it
-        is important when decoding modified spectra: otherwise arbitrary phase near the right
-        boundary can be amplified by the small inverse-STFT window envelope.
+        Centers are floor(hop/2) + t*hop. Explicit reflection padding gives the
+        original SincNet frame count while keeping both boundaries covered.
         """
         x = self._as_waveform(wav).to(self.window.dtype)
+        left = self.n_fft // 2 - self.frame_offset
+        right = self.n_fft // 2 + self.frame_offset - 1
+        x = F.pad(x, (left, right), mode="reflect")
         spectrum = torch.stft(
             x, self.n_fft, self.hop_length, self.win_length,
-            window=self.window, return_complex=True, center=True
+            window=self.window, return_complex=True, center=False
         )
         return spectrum[:, :self.n_bins].contiguous()
 
     def _synthesis(self, spectrum:torch.Tensor, length:int|None=None) -> torch.Tensor:
-        """complex (B,F,T) -> (B,L), restoring the dropped bin as zeros.
+        """complex (B,F,T) -> (B,L), using normalized overlap-add.
 
-        With center=True, T frames naturally cover (T - 1) hops; default to that when no explicit
-        length is given."""
+        Default L is T*hop; pass the original length to remove a partial final
+        hop. Manual overlap-add permits the shifted crop without inverse-STFT
+        checks on the unused zero-window endpoints of the padded signal.
+        """
         T = spectrum.shape[-1]
         if length is None:
-            length = (T - 1) * self.hop_length
+            length = T * self.hop_length
+        if T < 1 or not 0 < length <= T * self.hop_length:
+            raise ValueError("length must be positive and no greater than frames * hop_length")
         full = F.pad(spectrum, (0, 0, 0, 1))
-        return torch.istft(
-            full, self.n_fft, self.hop_length, self.win_length,
-            window=self.window, center=True, length=length
-        )
+        gap = self.n_fft - self.win_length
+        window = F.pad(self.window, (gap // 2, gap - gap // 2)).to(spectrum.real)
+        frames = torch.fft.irfft(full, n=self.n_fft, dim=1) * window[None, :, None]
+        size = (T - 1) * self.hop_length + self.n_fft
+        waveform = F.fold(frames, (1, size), (1, self.n_fft),
+                          stride=(1, self.hop_length)).flatten(1)
+        envelope = F.fold(window.square()[None, :, None].expand(1, self.n_fft, T),
+                          (1, size), (1, self.n_fft),
+                          stride=(1, self.hop_length)).flatten(1)
+        left = self.n_fft // 2 - self.frame_offset
+        waveform = waveform[:, left:left + length]
+        envelope = envelope[:, left:left + length]
+        if envelope.shape[-1] != length or torch.any(envelope <= 0):
+            raise ValueError("Synthesis windows do not cover the requested waveform")
+        return waveform / envelope
 
     def _to_complex(self, spectrogram:torch.Tensor) -> torch.Tensor:
         """(B,2,F,T) real or (B,F,T) complex -> (B,F,T) complex"""
@@ -160,7 +178,7 @@ class STFT(nn.Module):
         else:
             angle = initial_angle.unsqueeze(1) if initial_angle.ndim == 3 else initial_angle
 
-        length = (magnitude.shape[-1] - 1) * self.hop_length
+        length = magnitude.shape[-1] * self.hop_length
         for _ in range(n_iters+1):
             spectrum = (magnitude * torch.complex(torch.cos(angle), torch.sin(angle))).squeeze(1)
             forward = self._analysis(self._synthesis(spectrum, length=length))
@@ -188,3 +206,73 @@ class STFT(nn.Module):
         x = self.encode(x)
         x = self.decode(x, length=length)
         return x
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Check STFT frame-rate, bin-count and length contracts")
+    parser.add_argument("--fs", type=int, default=16000)
+    parser.add_argument("--fps", type=int, nargs="+", default=[64, 128, 250])
+    parser.add_argument("--n-bins", type=int, nargs="+", default=[128, 256, 512])
+    parser.add_argument("--overlap", type=int, nargs="+", choices=[2, 4], default=[2, 4])
+    parser.add_argument("--seconds", type=int, default=1)
+    args = parser.parse_args()
+    if min(args.fs, args.seconds, *args.fps, *args.n_bins) <= 0:
+        parser.error("fs, seconds, fps and n-bins must be positive")
+
+    def check(condition:bool, message:str) -> None:
+        if not condition:
+            raise RuntimeError(message)
+
+    torch.manual_seed(0)
+    torch.set_num_threads(min(torch.get_num_threads(), 2))
+    passed = skipped = cases = 0
+    print(f"fs={args.fs} Hz; main input={args.seconds}s; B=2")
+    print("Contract: H=fs/fps, F=n_bins, T=ceil(L/H), default decode length=T*H")
+    print("Frame centers: floor(H/2) + t*H samples; layouts: channel and complex")
+    print(f"{'fps':>5} {'bins':>5} {'overlap':>7} {'hop':>5} {'window':>6} {'(B,2,F,T)':>22}")
+    with torch.no_grad():
+        for fps in args.fps:
+            for bins in args.n_bins:
+                for overlap in args.overlap:
+                    try:
+                        model = STFT(fs=args.fs, fps=fps, n_bins=bins, overlap=overlap)
+                    except (ValueError, AssertionError) as exc:
+                        print(f"SKIP fps={fps}, bins={bins}, overlap={overlap}: {exc or 'n_bins must be a power of two'}")
+                        skipped += 1
+                        continue
+                    hop = model.hop_length
+                    check(hop * fps == args.fs, "Actual frame rate differs from requested fps")
+                    main_length = args.fs * args.seconds
+                    # Whole seconds, partial hops and the consumer's U-Net crop sizes.
+                    lengths = sorted({main_length, main_length - 1, main_length + 1,
+                                      *(hops * hop + delta for hops in (256, 320) for delta in (-1, 0, 1))})
+                    main_shape = None
+                    for length in lengths:
+                        wav = torch.randn(2, length)
+                        frames = (length + hop - 1) // hop
+                        model.layout = "channel"
+                        spec = model.encode(wav)
+                        check(spec.shape == (2, 2, bins, frames), f"Unexpected shape: {spec.shape}")
+                        check(torch.isfinite(spec).all().item(), "Non-finite spectrogram")
+                        decoded = model.decode(spec)
+                        check(decoded.shape == (2, frames * hop), "Wrong default decode length")
+                        check(model.decode(spec, length=length).shape == wav.shape, "Explicit length was lost")
+                        check(torch.isfinite(decoded).all().item(), "Non-finite reconstruction")
+                        model.layout = "complex"
+                        complex_spec = model.encode(wav)
+                        check(complex_spec.shape == (2, bins, frames), "Wrong complex layout shape")
+                        torch.testing.assert_close(complex_spec, torch.complex(spec[:, 0], spec[:, 1]))
+                        torch.testing.assert_close(model.decode(complex_spec), decoded)
+                        if length == main_length:
+                            check(frames == fps * args.seconds, "Whole-second frame count differs from fps*seconds")
+                            main_shape = tuple(spec.shape)
+                        if length in (256 * hop, 320 * hop):
+                            check(frames % 32 == 0, "Consumer frame count is not divisible by 32")
+                        cases += 1
+                    print(f"{fps:5d} {bins:5d} {overlap:7d} {hop:5d} {model.win_length:6d} {str(main_shape):>22}")
+                    passed += 1
+    if not passed:
+        parser.error("No valid configurations; fps must divide fs and overlap*hop must fit in 2*n_bins")
+    print(f"PASS: {passed} configurations, {cases} lengths in both layouts; {skipped} invalid combinations skipped.")

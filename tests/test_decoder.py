@@ -113,7 +113,7 @@ def test_encoder_fused_complex_analysis_matches_split_calls():
     encoder = model.encoder
 
     padded = torch.nn.functional.pad(
-        waveform.unsqueeze(1), (encoder.padding, encoder.padding + 1), mode="reflect"
+        waveform.unsqueeze(1), (encoder.padding, encoder.padding), mode="reflect"
     )
     real = torch.nn.functional.conv1d(padded, encoder.filters.real, stride=encoder.stride)
     imag = torch.nn.functional.conv1d(padded, encoder.filters.imag, stride=encoder.stride)
