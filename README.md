@@ -64,15 +64,20 @@ from sincnet import create_spectrogram_transform
 params = dict(spec_type="stft", fs=16000, fps=128, n_bins=256,
               q_bits=8, overlap=4, scale="lin", causal=False)
 frontend = create_spectrogram_transform(params)
-spec = frontend.encode(wav)  # (B, 2, 256, 129) for (B, 16000) input
+spec = frontend.encode(wav)  # (B, 2, 256, 128) for (B, 16000) input
 
 params["spec_type"] = "sincnet"
 frontend = create_spectrogram_transform(params)
-spec = frontend.encode(wav)  # same shape
+spec = frontend.encode(wav)  # (B, 2, 256, 128): original SincNet framing
 ```
 
 The factory accepts mono `(B, L)` or `(B, 1, L)` waveforms and returns real/imaginary
-channels with `F = n_bins` and `T = 1 + L // (fs // fps)` for either backend.
+channels with `F = n_bins`. With `H = fs // fps`, SincNet preserves its original
+`T = ceil(L / H)` framing, and STFT now matches that frame count. A 256-hop or
+320-hop clip produces exactly 256 or 320 frames with either backend. STFT window
+centers are `floor(H / 2) + t * H`, while SincNet retains its original sample-zero
+centers. The shapes match; frame-center times differ by `floor(H / 2)` samples
+(62 samples, or 3.875 ms, at 16 kHz / 128 fps).
 `fs` must be divisible by `fps`. It selects SincNet's `component="complex"` and
 STFT's `layout="channel"`; conflicting settings are rejected. Direct constructors
 still support their existing layouts. The dictionary is copied, and unknown keys
@@ -97,11 +102,20 @@ fixed kernel duration; this option does not change it. STFT drops the Nyquist bi
 so reconstruction is approximate even with a suitable window. Pass the original
 waveform length to `decode` to preserve lengths that are not multiples of the hop.
 
-SincNet now retains the right boundary frame for hop-aligned inputs, adding one
-frame compared with earlier versions. Its analytical decoders default to
-`(T - 1) * hop_length` samples, matching STFT; the learned decoder still emits
-`T * hop_length` samples. Existing saved spectrograms and learned-decoder pipelines
-may need their framing assumptions updated.
+SincNet's symmetric encoder padding and default analytical decoding length
+`T * hop_length` are restored for compatibility with existing consumers and
+checkpoints. This reverses the framing regression introduced in `e80d472`.
+The learned decoder keeps its original behavior. STFT now also defaults to
+`T * hop_length` samples, with explicit `length` preserving a partial final hop.
+Its half-hop reflection padding and normalized overlap-add avoid the unstable
+right boundary caused by simply dropping the last sample-zero-centered frame.
+Previously saved STFT spectrograms use a different timing/frame-count convention
+and must be regenerated; loading the old window buffer does not convert them.
+
+Run `make stft` (with your Python environment activated) to sweep `fps`, `n_bins`,
+and overlap, print actual output shapes, and check aligned/unaligned decode lengths
+in both layouts. Customize the sweep with, for example,
+`python -m sincnet.stft --fs 16384 --fps 64 128 --n-bins 128 256 --overlap 2 4`.
 
 Both frontends accept the same quantizer configuration through their constructors
 and the factory:

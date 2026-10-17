@@ -296,9 +296,7 @@ class Encoder1d(nn.Module):
         elif wav.size(1) != 1:
             raise ValueError("Expected mono waveform (B,1,L)")
         
-        # The odd kernel needs one extra right sample to retain the frame
-        # centered at L when L is hop-aligned, matching center=True STFT.
-        wav = F.pad(wav, (self.padding, self.padding + 1), mode="reflect")
+        wav = F.pad(wav, (self.padding, self.padding), mode="reflect")
         
         if self.component == "complex":
             spectrogram = F.conv1d(wav, self.filters_cat, stride=self.stride)
@@ -364,7 +362,7 @@ class AnalyticDecoder1d(nn.Module):
     def forward(self, spec:torch.Tensor, length:int|None=None) -> torch.Tensor:
         """Map ``(B,C,F,T)`` coefficients to an exact-length waveform."""
         if length is None:
-            length = (spec.shape[-1] - 1) * self.config.hop_length
+            length = spec.shape[-1] * self.config.hop_length
         return frame_pseudo_inverse(spec, self._encoder[0], length, self.n_iter, self.tol, self.reg)
 
 
@@ -452,7 +450,7 @@ class FastAnalyticDecoder1d(nn.Module):
         # The encoder reflect-pads the input by `padding` before the strided conv, so the valid
         # reconstruction sits at [padding : padding+length] of the (padding-free) transpose output.
         if length is None:
-            length = (spec.shape[-1] - 1) * self.stride
+            length = spec.shape[-1] * self.stride
         x_hat = x_hat[..., self.padding : self.padding + length]
         return x_hat
 
